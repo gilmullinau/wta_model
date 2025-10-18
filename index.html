@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WTA Match Outcome — Browser ML Demo (TensorFlow.js)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Chart.js for visualizations -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+
+  <!-- TensorFlow.js global -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header>
+    <h1>WTA Match Outcome — In-Browser Neural Network (TensorFlow.js)</h1>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h3 style="margin-top:0;">Dataset & Training Controls</h3>
+      <div class="row btn-row">
+        <button id="trainBtn" disabled>Train Model</button>
+        <button id="evalBtn" disabled>Evaluate</button>
+        <button id="saveBtn" disabled>Save Model</button>
+        <button id="loadModelBtn">Load Saved</button>
+      </div>
+      <div class="row file-row">
+        <input type="file" id="fileInput" accept=".csv" />
+        <button id="loadFileBtn" type="button">Load CSV</button>
+        <span class="small">Use this if automatic loading of <code>wta_data.csv</code> fails.</span>
+      </div>
+      <div class="hyper-grid">
+        <label>Epochs<input type="number" id="epochsInput" value="6" min="1" max="200" /></label>
+        <label>Batch size<input type="number" id="batchSizeInput" value="256" min="8" max="1024" step="8" disabled /></label>
+        <label>Validation split<input type="number" id="valSplitInput" value="0.2" min="0.05" max="0.4" step="0.05" disabled /></label>
+        <label>Hidden layer 1<input type="number" id="layer1Units" value="128" min="4" max="512" disabled /></label>
+        <label>Hidden layer 2<input type="number" id="layer2Units" value="64" min="0" max="512" disabled /></label>
+        <label>Dropout<input type="number" id="dropoutRate" value="0.3" min="0" max="0.8" step="0.05" disabled /></label>
+      </div>
+      <div class="small muted" style="margin-top:6px;">Batch size, validation split, hidden layers, and dropout stay at their default values.</div>
+      <div class="metrics" id="info" style="margin-top:8px;">Loading dataset...</div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Training Progress & Results</h3>
+      <div class="charts">
+        <div style="height:280px;">
+          <canvas id="lossChart"></canvas>
+          <div class="small">Training Loss & Validation Accuracy</div>
+        </div>
+        <div style="height:280px;">
+          <canvas id="cmChart"></canvas>
+          <div class="small">Confusion Matrix (Test Set)</div>
+        </div>
+      </div>
+      <div class="log-actions">
+        <button id="clearLogsBtn" type="button">Clear Log</button>
+      </div>
+      <pre id="logs"></pre>
+    </div>
+
+    <div class="card" id="predictPanel">
+      <h3 style="margin-top:0;">Predict Future Match</h3>
+      <div class="player-select-grid">
+        <label>Player 1
+          <select id="player1Select"></select>
+        </label>
+        <label>Player 2
+          <select id="player2Select"></select>
+        </label>
+      </div>
+      <div class="scenario-note small">Scenario year fixed to <b>2025</b>. Choose surface, court, and round from recorded values.</div>
+      <div class="match-context-grid">
+        <label>Surface
+          <select id="surfaceSelect"></select>
+        </label>
+        <label>Court
+          <select id="courtSelect"></select>
+        </label>
+        <label>Round
+          <select id="roundSelect"></select>
+        </label>
+      </div>
+      <div id="matchSummary" class="small muted">Select two players to build a 2025 matchup from the dataset.</div>
+      <table class="feature-table">
+        <tbody id="featureTableBody"></tbody>
+      </table>
+      <button id="predictBtn" type="button">Predict</button>
+      <div id="predictOut" style="margin-top:10px; font-weight:600;"></div>
+    </div>
+
+    <div class="footer">
+      Data auto-loaded from <b>wta_data.csv</b> in project root.
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
