@@ -275,6 +275,44 @@ export class DataLoader {
     return this.sequenceRows.slice();
   }
 
+  buildPredictSequence(player, seqLen = this.seqLen) {
+    if (!player) throw new Error("Player name is required for GRU prediction.");
+    const featureList = this.sequenceFeatureCols.slice();
+    const rows = this.sequenceRows
+      .filter((r) => (r.player || "").toString() === player)
+      .sort((a, b) => {
+        const ta = Number.isFinite(a.timestamp) ? a.timestamp : -Infinity;
+        const tb = Number.isFinite(b.timestamp) ? b.timestamp : -Infinity;
+        return ta - tb;
+      });
+
+    const sequence = [];
+    const padding = Math.max(0, seqLen - rows.length);
+    for (let i = 0; i < padding; i++) {
+      sequence.push(Array.from({ length: featureList.length }, () => 0));
+    }
+
+    const recent = rows.slice(-seqLen);
+    for (const r of recent) {
+      const step = featureList.map((f) => {
+        const val = this._toNumber(r[f]);
+        return Number.isFinite(val) ? val : 0;
+      });
+      sequence.push(step);
+    }
+
+    return {
+      sequence,
+      featureList,
+      meta: {
+        player,
+        latestDate: recent.length > 0 ? (recent[recent.length - 1].date || "") : "",
+        padded: padding > 0,
+        usedRows: recent.length,
+      }
+    };
+  }
+
   getPlayerSnapshot(player) {
     if (!player) return null;
     return this.playerStats.get(player) || null;

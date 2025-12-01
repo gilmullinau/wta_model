@@ -3,6 +3,7 @@
 
 import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
 import { ModelMLP } from "./gru.js";
+import { GruModel } from "./gru-model.js";
 import { buildSequences } from "./sequence-builder.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
@@ -15,6 +16,13 @@ const DEFAULT_HYPERPARAMS = {
   validationSplit: 0.2,
   hiddenUnits: [128, 64],
   dropout: 0.3,
+};
+const DEFAULT_GRU_CONFIG = {
+  units: 64,
+  denseUnits: 32,
+  dropout: 0.2,
+  lr: 0.001,
+  batchSize: 128,
 };
 
 let loader = null;
@@ -52,6 +60,11 @@ const els = {
   gruExampleMeta: document.getElementById("gruExampleMeta"),
   gruTensorShapes: document.getElementById("gruTensorShapes"),
   gruError: document.getElementById("gruError"),
+  gruUnitsInput: document.getElementById("gruUnits"),
+  gruDenseUnitsInput: document.getElementById("gruDenseUnits"),
+  gruDropoutInput: document.getElementById("gruDropout"),
+  gruLrInput: document.getElementById("gruLr"),
+  gruBatchInput: document.getElementById("gruBatch"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
@@ -188,8 +201,8 @@ async function parseAndInit(text) {
     els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
     log("Dataset loaded successfully.");
     if (currentModelType === "GRU") {
-      prepareGruSequences();
-      enableTraining(false);
+      const ok = prepareGruSequences();
+      enableTraining(ok);
     } else {
       resetGruDebug("GRU sequences available only in GRU mode.");
       enableTraining(true);
@@ -229,27 +242,29 @@ async function autoLoadCSV() {
 function prepareGruSequences() {
   if (!loader) {
     resetGruDebug("Load a dataset to build GRU sequences.");
-    return;
+    return false;
   }
   if (currentModelType !== "GRU") {
     resetGruDebug("Switch to GRU mode to build sequences.");
-    return;
+    return false;
   }
   try {
     const rows = loader.getSequenceRows();
     const featureList = loader.getSequenceFeatureList();
     if (!rows || rows.length === 0) {
       resetGruDebug("No rows available for GRU sequence builder.");
-      return;
+      return false;
     }
     const seqLen = getSelectedSeqLen();
     loader.seqLen = seqLen;
     const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
     renderGruSummary(result, featureList.length);
+    return true;
   } catch (err) {
     renderGruError(err.message);
     log(`Sequence builder error: ${err.message}`);
+    return false;
   }
 }
 
@@ -398,6 +413,10 @@ function handlePlayer1Change() {
   }
 
   const { opponents, preserved } = populatePlayer2Options(player1);
+  if (currentModelType === "GRU") {
+    els.predictBtn.disabled = false;
+    els.matchSummary.textContent = `GRU inference will use ${player1}'s last ${loader.seqLen} matches (padded if needed).`;
+  }
   if (opponents.length === 0) {
     resetAutoPredictPanel(`No recorded opponents for ${player1} in the dataset.`);
     return;
@@ -414,6 +433,16 @@ function updateAutoPreview() {
   if (!loader) return;
   const player1 = els.player1Select.value;
   const player2 = els.player2Select.value;
+  if (currentModelType === "GRU") {
+    if (!player1) {
+      resetAutoPredictPanel(`Select a player to build a ${SCENARIO_YEAR} GRU sequence.`);
+      return;
+    }
+    els.matchSummary.textContent = `GRU will use ${player1}'s last ${loader.seqLen} matches (padded if too short).`;
+    els.predictBtn.disabled = !model;
+    els.featureTableBody.innerHTML = "";
+    return;
+  }
   if (!player1) {
     setPlayer2Placeholder("Select Player 1 first…");
     resetAutoPredictPanel(`Select two players to build a ${SCENARIO_YEAR} matchup from the dataset.`);
@@ -569,30 +598,50 @@ function isFiniteNumber(value) {
 
 async function trainModel() {
   if (!dataset) return alert("Dataset not loaded yet.");
-  if (currentModelType === "GRU") {
-    alert("GRU training is not enabled yet. Use GRU mode to inspect sequences and switch to MLP for training.");
-    return;
-  }
   if (model) model.dispose();
-  const hyper = readHyperparameters();
-  model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
-  model.build();
-  log("Training started...");
+  const mode = currentModelType;
+  log(`Training started in ${mode} mode...`);
   const losses = [], valAcc = [];
   enableTraining(false);
   try {
-    await model.train(dataset.X_train, dataset.y_train, {
-      epochs: hyper.training.epochs,
-      batchSize: hyper.training.batchSize,
-      validationSplit: hyper.training.validationSplit,
-      onEpochEnd: (epoch, logs) => {
-        const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-        log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
-        losses.push(Number(logs.loss));
-        valAcc.push(Number(val));
-        drawLossChart(losses, valAcc);
-      }
-    });
+    if (mode === "GRU") {
+      const hyper = readGruHyperparameters();
+      model = new GruModel({
+        units: hyper.architecture.units,
+        denseUnits: hyper.architecture.denseUnits,
+        dropout: hyper.architecture.dropout,
+        lr: hyper.architecture.lr,
+      });
+      model.build([loader.seqLen, dataset.featureNames.length]);
+      model.setMetadata(loader.meta);
+      await model.train(dataset.X_train, dataset.y_train, dataset.X_test, dataset.y_test, {
+        epochs: hyper.training.epochs,
+        batchSize: hyper.training.batchSize,
+        onEpochEnd: (epoch, logs) => {
+          const val = logs.val_acc ?? logs.val_accuracy ?? 0;
+          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
+          losses.push(Number(logs.loss));
+          valAcc.push(Number(val));
+          drawLossChart(losses, valAcc);
+        }
+      });
+    } else {
+      const hyper = readHyperparameters();
+      model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
+      model.build();
+      await model.train(dataset.X_train, dataset.y_train, {
+        epochs: hyper.training.epochs,
+        batchSize: hyper.training.batchSize,
+        validationSplit: hyper.training.validationSplit,
+        onEpochEnd: (epoch, logs) => {
+          const val = logs.val_acc ?? logs.val_accuracy ?? 0;
+          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
+          losses.push(Number(logs.loss));
+          valAcc.push(Number(val));
+          drawLossChart(losses, valAcc);
+        }
+      });
+    }
 
     log("Training complete.");
     els.saveBtn.disabled = false;
@@ -655,21 +704,34 @@ function drawConfusionMatrix({ tp, tn, fp, fn }) {
 async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
-  if (!currentAutoVector) {
-    alert("Select two players with available matchup data first.");
-    return;
-  }
   try {
-    const vec = loader.vectorizeForPredict(currentAutoVector);
-    const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
-    const yProb = model.predictProba(x);
-    const prob = (await yProb.data())[0];
-    const pred = prob >= 0.5 ? 1 : 0;
-    const player1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const player2 = currentAutoPayload?.players?.player2 || "Player 2";
-    const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
-    els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
-    x.dispose(); yProb.dispose();
+    if (currentModelType === "GRU") {
+      const player1 = els.player1Select.value;
+      if (!player1) throw new Error("Select Player 1 to build a GRU sequence.");
+      const { sequence, featureList, meta } = loader.buildPredictSequence(player1, loader.seqLen);
+      if (!sequence || sequence.length === 0) throw new Error("No history available to build a GRU sequence.");
+      const x = tf.tensor3d([sequence], [1, loader.seqLen, featureList.length], "float32");
+      const prob = await model.predict(x);
+      const player2 = els.player2Select.value || "Player 2";
+      const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
+      els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
+      x.dispose();
+    } else {
+      if (!currentAutoVector) {
+        alert("Select two players with available matchup data first.");
+        return;
+      }
+      const vec = loader.vectorizeForPredict(currentAutoVector);
+      const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
+      const yProb = model.predictProba(x);
+      const prob = (await yProb.data())[0];
+      const pred = prob >= 0.5 ? 1 : 0;
+      const player1 = currentAutoPayload?.players?.player1 || "Player 1";
+      const player2 = currentAutoPayload?.players?.player2 || "Player 2";
+      const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
+      els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
+      x.dispose(); yProb.dispose();
+    }
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
     alert(err.message);
@@ -680,14 +742,23 @@ async function handlePredict(e) {
 els.trainBtn.addEventListener("click", trainModel);
 els.evalBtn.addEventListener("click", evaluateModel);
 els.saveBtn.addEventListener("click", async () => {
-  if (model) { await model.save(); log("Model saved to browser storage."); }
+  if (model) {
+    await model.save();
+    log("Model saved to browser storage.");
+  }
 });
 els.loadModelBtn.addEventListener("click", async () => {
   try {
-    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
-    await m.load();
-    model = m;
-    log("Model loaded from browser storage.");
+    if (currentModelType === "GRU") {
+      const m = await GruModel.load();
+      model = m;
+      log("GRU model loaded from browser storage.");
+    } else {
+      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
+      await m.load();
+      model = m;
+      log("MLP model loaded from browser storage.");
+    }
     showPredictPanel(true);
     enableTraining(Boolean(dataset));
     if (!dataset || !loader) {
@@ -721,16 +792,36 @@ console.log("✅ autoLoadCSV() call placed after init");
 
 function readHyperparameters() {
   const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const batchSize = clampInt(els.batchSizeInput?.value, 8, 1024, DEFAULT_HYPERPARAMS.batchSize);
+  const valSplit = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
+  const validationSplit = Number.isFinite(valSplit) ? Math.min(Math.max(valSplit, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
+  const layer1 = clampInt(els.layer1Input?.value, 4, 512, DEFAULT_HYPERPARAMS.hiddenUnits[0]);
+  const layer2 = clampInt(els.layer2Input?.value, 0, 512, DEFAULT_HYPERPARAMS.hiddenUnits[1]);
+  const dropout = Math.min(Math.max(Number.parseFloat(els.dropoutInput?.value ?? DEFAULT_HYPERPARAMS.dropout), 0), 0.9);
   return {
     training: {
       epochs,
-      batchSize: DEFAULT_HYPERPARAMS.batchSize,
-      validationSplit: DEFAULT_HYPERPARAMS.validationSplit,
+      batchSize,
+      validationSplit,
     },
     architecture: {
-      hiddenUnits: DEFAULT_HYPERPARAMS.hiddenUnits.slice(),
-      dropout: DEFAULT_HYPERPARAMS.dropout,
+      hiddenUnits: [layer1, layer2].filter((n) => Number.isFinite(n) && n > 0),
+      dropout,
     }
+  };
+}
+
+function readGruHyperparameters() {
+  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const batchSize = clampInt(els.gruBatchInput?.value, 8, 1024, DEFAULT_GRU_CONFIG.batchSize);
+  const units = clampInt(els.gruUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.units);
+  const denseUnits = clampInt(els.gruDenseUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.denseUnits);
+  const dropout = Math.min(Math.max(Number.parseFloat(els.gruDropoutInput?.value ?? DEFAULT_GRU_CONFIG.dropout), 0), 0.9);
+  const lr = Number.parseFloat(els.gruLrInput?.value ?? DEFAULT_GRU_CONFIG.lr);
+  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_GRU_CONFIG.lr;
+  return {
+    training: { epochs, batchSize },
+    architecture: { units, denseUnits, dropout, lr: learningRate },
   };
 }
 
