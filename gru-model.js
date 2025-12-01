@@ -40,8 +40,19 @@ export class GruModel {
     });
   }
 
-  async train(X_train, y_train, X_val, y_val, { epochs = 6, batchSize = 128, onEpochEnd = null } = {}) {
+  async train(X_train, y_train, X_val, y_val, { epochs = 6, batchSize = 64, onEpochEnd = null } = {}) {
     if (!this.model) throw new Error("Model not built. Call build() first.");
+    if (!(X_train instanceof tf.Tensor) || !(y_train instanceof tf.Tensor)) {
+      throw new Error("GRU training requires tensor inputs.");
+    }
+    const effectiveBatch = Math.min(Math.max(Number.isFinite(batchSize) ? batchSize : 32, 16), 64);
+    console.log("GRU fit() with batch size", effectiveBatch);
+    try {
+      console.log("Model summary:");
+      this.model.summary();
+    } catch (err) {
+      console.warn("Failed to print GRU model summary", err);
+    }
     const callbacks = {
       onEpochEnd: async (epoch, logs) => {
         if (onEpochEnd) onEpochEnd(epoch, logs);
@@ -50,7 +61,7 @@ export class GruModel {
     };
     return await this.model.fit(X_train, y_train, {
       epochs,
-      batchSize,
+      batchSize: effectiveBatch,
       validationData: X_val && y_val ? [X_val, y_val] : null,
       callbacks,
       shuffle: true,

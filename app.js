@@ -598,7 +598,14 @@ function isFiniteNumber(value) {
 
 async function trainModel() {
   if (!dataset) return alert("Dataset not loaded yet.");
-  if (model) model.dispose();
+  if (model) {
+    model.dispose();
+  }
+  try {
+    if (tf?.engine) tf.engine().reset();
+  } catch (err) {
+    console.warn("Failed to reset TensorFlow engine", err);
+  }
   const mode = currentModelType;
   log(`Training started in ${mode} mode...`);
   const losses = [], valAcc = [];
@@ -606,6 +613,18 @@ async function trainModel() {
   try {
     if (mode === "GRU") {
       const hyper = readGruHyperparameters();
+      if (hyper.training.rawBatch > 64) {
+        log("Batch size too large for GRU; capped at 64 to avoid WebGL OOM.");
+      }
+      const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
+      const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
+      console.log("GRU tensor check:", tensorsAreValid, testTensorsValid);
+      console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
+      log(`GRU tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
+      if (!tensorsAreValid || !testTensorsValid) {
+        log("GRU ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
+        throw new Error("Invalid GRU input tensors");
+      }
       model = new GruModel({
         units: hyper.architecture.units,
         denseUnits: hyper.architecture.denseUnits,
@@ -613,6 +632,8 @@ async function trainModel() {
         lr: hyper.architecture.lr,
       });
       model.build([loader.seqLen, dataset.featureNames.length]);
+      console.log("Model summary:");
+      model.model.summary();
       model.setMetadata(loader.meta);
       await model.train(dataset.X_train, dataset.y_train, dataset.X_test, dataset.y_test, {
         epochs: hyper.training.epochs,
@@ -813,14 +834,15 @@ function readHyperparameters() {
 
 function readGruHyperparameters() {
   const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
-  const batchSize = clampInt(els.gruBatchInput?.value, 8, 1024, DEFAULT_GRU_CONFIG.batchSize);
+  const rawBatch = Number.parseInt(els.gruBatchInput?.value ?? DEFAULT_GRU_CONFIG.batchSize, 10);
+  const clampedBatch = clampInt(rawBatch, 16, 64, DEFAULT_GRU_CONFIG.batchSize);
   const units = clampInt(els.gruUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.units);
   const denseUnits = clampInt(els.gruDenseUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.denseUnits);
   const dropout = Math.min(Math.max(Number.parseFloat(els.gruDropoutInput?.value ?? DEFAULT_GRU_CONFIG.dropout), 0), 0.9);
   const lr = Number.parseFloat(els.gruLrInput?.value ?? DEFAULT_GRU_CONFIG.lr);
   const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_GRU_CONFIG.lr;
   return {
-    training: { epochs, batchSize },
+    training: { epochs, batchSize: clampedBatch, rawBatch },
     architecture: { units, denseUnits, dropout, lr: learningRate },
   };
 }

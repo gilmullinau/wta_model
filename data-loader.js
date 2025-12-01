@@ -194,6 +194,12 @@ export class DataLoader {
       const X_test = tf.tensor3d(seqTest.X, [seqTest.stats.numSamples, this.seqLen, featureList.length], "float32");
       const y_test = tf.tensor1d(seqTest.y, "float32");
 
+      console.log("GRU tensors created", X_train instanceof tf.Tensor, y_train instanceof tf.Tensor, X_test instanceof tf.Tensor, y_test instanceof tf.Tensor);
+      this.X_train = X_train;
+      this.y_train = y_train;
+      this.X_test = X_test;
+      this.y_test = y_test;
+
       this.featureNames = featureList.slice();
       this.meta = {
         modelType: "GRU",
