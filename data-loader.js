@@ -24,6 +24,10 @@ export const GRU_SEQUENCE_FEATURES = [
   "surface_win_rate_hard_5",
   "surface_win_rate_clay_5",
   "surface_win_rate_grass_5",
+  "surface_wr_hard_5",
+  "surface_wr_clay_5",
+  "surface_wr_grass_5",
+  "recent_surface_wr",
 ];
 
 export class DataLoader {
@@ -79,6 +83,8 @@ export class DataLoader {
       if (missingCategorical.length > 0) missing.push(`categorical: ${missingCategorical.join(", ")}`);
       throw new Error(`Missing expected columns — ${missing.join("; ")}`);
     }
+
+    this.sequenceFeatureCols = this._buildSequenceFeatureList(headers);
 
     const metaRows = raw.map((row) => ({
       player1: (row["Player_1"] ?? "").toString().trim(),
@@ -188,6 +194,10 @@ export class DataLoader {
     return opponents ? opponents.slice() : [];
   }
 
+  getSequenceFeatureList() {
+    return this.sequenceFeatureCols.slice();
+  }
+
   getSequenceRows() {
     return this.sequenceRows.slice();
   }
@@ -286,6 +296,21 @@ export class DataLoader {
       }
       this.catLevels[col] = Array.from(set.values()).sort();
     }
+  }
+
+  _buildSequenceFeatureList(headers) {
+    const base = GRU_SEQUENCE_FEATURES.slice();
+    const baseSet = new Set(base);
+    const extras = [];
+    for (const h of headers) {
+      if (h === this.labelCol) continue;
+      if (this.dropCols.includes(h)) continue;
+      if (this.categoricalCols.includes(h)) continue;
+      if (baseSet.has(h)) continue;
+      extras.push(h);
+    }
+    extras.sort();
+    return base.concat(extras);
   }
 
   _buildDesignMatrix(rows, featureNames = null) {

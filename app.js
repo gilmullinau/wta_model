@@ -95,7 +95,7 @@ function resetGruDebug(message = "GRU sequences not prepared yet.") {
   els.gruExampleBtn.disabled = true;
 }
 
-function renderGruSummary(result) {
+function renderGruSummary(result, expectedFeatureCount = null) {
   const { stats, meta } = result;
   const paddingPercent = stats.paddingPercent.toFixed(1);
   const lines = [
@@ -110,7 +110,11 @@ function renderGruSummary(result) {
   els.gruSummary.textContent = lines.join("\n");
   els.gruTensorShapes.textContent = `X shape: [${stats.numSamples}, ${meta.seqLen}, ${meta.numFeatures}]\n` +
     `y shape: [${stats.numSamples}]\nStatus: OK`;
-  els.gruError.textContent = "";
+  if (expectedFeatureCount && meta.numFeatures < expectedFeatureCount) {
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in GRU sequences.\nModel will underperform. Check featureList.`;
+  } else {
+    els.gruError.textContent = "";
+  }
   els.gruExampleBtn.disabled = stats.numSamples === 0;
 }
 
@@ -201,13 +205,14 @@ function prepareGruSequences() {
   }
   try {
     const rows = loader.getSequenceRows();
+    const featureList = loader.getSequenceFeatureList();
     if (!rows || rows.length === 0) {
       resetGruDebug("No rows available for GRU sequence builder.");
       return;
     }
-    const result = buildSequences(rows, GRU_SEQ_LEN, GRU_FEATURES);
+    const result = buildSequences(rows, GRU_SEQ_LEN, featureList);
     gruSequences = result;
-    renderGruSummary(result);
+    renderGruSummary(result, featureList.length);
   } catch (err) {
     renderGruError(err.message);
     log(`Sequence builder error: ${err.message}`);
