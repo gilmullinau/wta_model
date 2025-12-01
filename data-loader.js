@@ -58,6 +58,7 @@ export class DataLoader {
     this.meta = {
       modelType,
       featureList: [],
+      featureIndexMap: {},
       seqLen: modelType === "GRU" ? seqLen : null,
       mean: {},
       std: {},
@@ -204,9 +205,12 @@ export class DataLoader {
       this.meta = {
         modelType: "GRU",
         featureList: featureList.slice(),
+        featureIndexMap: seqTrain.meta.featureIndexMap,
         seqLen: this.seqLen,
+        featureCount: featureList.length,
         mean,
-        std
+        std,
+        stats: seqTrain.stats,
       };
 
       return {
@@ -218,8 +222,11 @@ export class DataLoader {
         artifacts: {
           scaler: { mean, std },
           featureNames: this.featureNames,
+          featureCount: featureList.length,
+          featureIndexMap: seqTrain.meta.featureIndexMap,
           modelType: "GRU",
-          seqLen: this.seqLen
+          seqLen: this.seqLen,
+          stats: seqTrain.stats,
         }
       };
     }
@@ -279,6 +286,56 @@ export class DataLoader {
 
   getSequenceRows() {
     return this.sequenceRows.slice();
+  }
+
+  buildGRUInputForMatch(player, seqLen = this.seqLen) {
+    if (this.modelType !== "GRU") {
+      throw new Error("GRU mode is required to build GRU inputs.");
+    }
+    if (!player) throw new Error("Player name is required for GRU prediction.");
+    const featureList = (this.meta.featureList && this.meta.featureList.length)
+      ? this.meta.featureList.slice()
+      : this.sequenceFeatureCols.slice();
+    const mean = this.meta.mean || {};
+    const std = this.meta.std || {};
+    const rows = this.sequenceRows
+      .filter((r) => (r.player || r.player1) === player)
+      .sort((a, b) => {
+        const ta = Number.isFinite(a.timestamp) ? a.timestamp : -Infinity;
+        const tb = Number.isFinite(b.timestamp) ? b.timestamp : -Infinity;
+        return ta - tb;
+      });
+
+    const sequence = [];
+    const padding = Math.max(0, seqLen - rows.length);
+    for (let i = 0; i < padding; i++) {
+      sequence.push(Array.from({ length: featureList.length }, () => 0));
+    }
+    const recent = rows.slice(-seqLen);
+    for (const r of recent) {
+      const step = featureList.map((f) => {
+        const rawBase = f === "year" ? SCENARIO_YEAR : (r.__meta?.numeric?.[f] ?? r[f]);
+        const raw = this._toNumber(rawBase);
+        const mu = mean[f] ?? 0;
+        const sigma = std[f] ?? 1;
+        const norm = Number.isFinite(raw) ? (sigma === 0 ? 0 : (raw - mu) / sigma) : 0;
+        return Number.isFinite(norm) ? norm : 0;
+      });
+      sequence.push(step);
+    }
+
+    const tensor = tf.tensor3d([sequence], [1, seqLen, featureList.length], "float32");
+    return {
+      tensor,
+      sequence,
+      featureList,
+      meta: {
+        player,
+        latestDate: recent.length > 0 ? (recent[recent.length - 1].date || recent[recent.length - 1].rawDate || "") : "",
+        padded: padding > 0,
+        usedRows: recent.length,
+      }
+    };
   }
 
   buildPredictSequence(player, seqLen = this.seqLen) {

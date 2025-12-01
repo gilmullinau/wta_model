@@ -22,7 +22,7 @@ const DEFAULT_GRU_CONFIG = {
   denseUnits: 32,
   dropout: 0.2,
   lr: 0.001,
-  batchSize: 128,
+  batchSize: 64,
 };
 
 let loader = null;
@@ -34,6 +34,7 @@ let currentAutoVector = null;
 let currentAutoPayload = null;
 let gruSequences = null;
 let currentModelType = "MLP";
+let lastCSVText = null;
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -65,6 +66,8 @@ const els = {
   gruDropoutInput: document.getElementById("gruDropout"),
   gruLrInput: document.getElementById("gruLr"),
   gruBatchInput: document.getElementById("gruBatch"),
+  gruPredictSummary: document.getElementById("gruPredictSummary"),
+  gruPredictTable: document.getElementById("gruPredictTable"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
@@ -100,6 +103,17 @@ function getSelectedModelType() {
   return value === "GRU" ? "GRU" : "MLP";
 }
 
+function setModeClass(mode) {
+  document.body.classList.remove("mode-mlp", "mode-gru");
+  document.body.classList.add(mode === "GRU" ? "mode-gru" : "mode-mlp");
+}
+
+function toggleHyperparamVisibility(mode) {
+  setModeClass(mode);
+  const isGru = mode === "GRU";
+  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = !isGru;
+}
+
 function getSelectedSeqLen() {
   const val = parseInt(els.gruSeqLenInput?.value ?? GRU_SEQ_LEN, 10);
   return Number.isInteger(val) && val > 0 ? val : GRU_SEQ_LEN;
@@ -119,6 +133,11 @@ function resetGruDebug(message = "GRU sequences not prepared yet.") {
   els.gruExampleTable.innerHTML = "";
   els.gruError.textContent = "";
   els.gruExampleBtn.disabled = true;
+}
+
+function resetGruPredictDebug(message = "GRU prediction debug will appear here in GRU mode.") {
+  if (els.gruPredictSummary) els.gruPredictSummary.textContent = message;
+  if (els.gruPredictTable) els.gruPredictTable.innerHTML = "";
 }
 
 function renderGruSummary(result, expectedFeatureCount = null) {
@@ -164,6 +183,25 @@ function renderGruExample(index = 0) {
   els.gruExampleMeta.textContent = `Target y = ${info.label ?? "?"} | Match date = ${date} | Player = ${player}`;
 }
 
+function renderGruPredictDebug(sequence, featureList, meta) {
+  if (!els.gruPredictSummary || !els.gruPredictTable) return;
+  const lines = [
+    "GRU PREDICTION DEBUG",
+    `Input shape: [1, ${loader.seqLen}, ${featureList.length}]`,
+    `Player: ${meta.player || "n/a"}`,
+    `Latest date: ${meta.latestDate || "n/a"}`,
+    `Padding: ${meta.padded ? "YES" : "NO"} | Matches used: ${meta.usedRows}`,
+  ];
+  els.gruPredictSummary.textContent = lines.join("\n");
+  const headers = ["Timestep", ...featureList];
+  const rows = sequence.map((values, i) => {
+    const cells = [`<td>${i + 1}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+    return `<tr>${cells.join("")}</tr>`;
+  });
+  const headerCells = headers.map((h) => `<th>${h}</th>`).join("");
+  els.gruPredictTable.innerHTML = `<thead><tr>${headerCells}</tr></thead><tbody>${rows.join("")}</tbody>`;
+}
+
 function renderGruError(message) {
   els.gruError.textContent = `SEQUENCE BUILDER ERROR:\n${message}`;
   els.gruSummary.textContent = "GRU SEQUENCE DEBUG\n------------------\nSequence builder failed.";
@@ -190,16 +228,26 @@ async function parseAndInit(text) {
     if (lossChart) { lossChart.destroy(); lossChart = null; }
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     resetGruDebug();
+    resetGruPredictDebug();
     currentModelType = getSelectedModelType();
+    toggleHyperparamVisibility(currentModelType);
     const seqLen = getSelectedSeqLen();
     loader = new DataLoader(currentModelType, seqLen);
     dataset = await loader.loadCSVText(text);
+    lastCSVText = text;
     const trainCount = dataset.X_train.shape[0];
     const testCount = dataset.X_test.shape[0];
     const featureCount = dataset.featureNames.length;
     const modeLine = `Mode: ${currentModelType}` + (currentModelType === "GRU" ? ` | SeqLen: ${seqLen}` : "");
     els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
-    log("Dataset loaded successfully.");
+    if (currentModelType === "GRU") {
+      log(`GRU MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
+      if (featureCount < 15) {
+        log(`Warning: Only ${featureCount} dynamic features provided to GRU. This may hurt accuracy.`);
+      }
+    } else {
+      log("Dataset loaded successfully.");
+    }
     if (currentModelType === "GRU") {
       const ok = prepareGruSequences();
       enableTraining(ok);
@@ -239,6 +287,18 @@ async function autoLoadCSV() {
   }
 }
 
+function handleModelTypeChange() {
+  const mode = getSelectedModelType();
+  currentModelType = mode;
+  toggleHyperparamVisibility(mode);
+  console.log(`Model type changed to ${mode}`);
+  resetGruDebug();
+  resetGruPredictDebug();
+  if (lastCSVText) {
+    parseAndInit(lastCSVText);
+  }
+}
+
 function prepareGruSequences() {
   if (!loader) {
     resetGruDebug("Load a dataset to build GRU sequences.");
@@ -259,7 +319,8 @@ function prepareGruSequences() {
     loader.seqLen = seqLen;
     const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
-    renderGruSummary(result, featureList.length);
+    const expectedCount = Math.max(20, featureList.length);
+    renderGruSummary(result, expectedCount);
     return true;
   } catch (err) {
     renderGruError(err.message);
@@ -441,6 +502,7 @@ function updateAutoPreview() {
     els.matchSummary.textContent = `GRU will use ${player1}'s last ${loader.seqLen} matches (padded if too short).`;
     els.predictBtn.disabled = !model;
     els.featureTableBody.innerHTML = "";
+    resetGruPredictDebug("Select a player to inspect the GRU input sequence.");
     return;
   }
   if (!player1) {
@@ -729,14 +791,14 @@ async function handlePredict(e) {
     if (currentModelType === "GRU") {
       const player1 = els.player1Select.value;
       if (!player1) throw new Error("Select Player 1 to build a GRU sequence.");
-      const { sequence, featureList, meta } = loader.buildPredictSequence(player1, loader.seqLen);
+      const { tensor, sequence, featureList, meta } = loader.buildGRUInputForMatch(player1, loader.seqLen);
       if (!sequence || sequence.length === 0) throw new Error("No history available to build a GRU sequence.");
-      const x = tf.tensor3d([sequence], [1, loader.seqLen, featureList.length], "float32");
-      const prob = await model.predict(x);
+      const prob = await model.predict(tensor);
       const player2 = els.player2Select.value || "Player 2";
       const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
       els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
-      x.dispose();
+      renderGruPredictDebug(sequence, featureList, meta);
+      tensor.dispose();
     } else {
       if (!currentAutoVector) {
         alert("Select two players with available matchup data first.");
@@ -801,6 +863,7 @@ els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
 els.gruExampleBtn.addEventListener("click", () => renderGruExample(0));
+els.modelTypeSelect.addEventListener("change", handleModelTypeChange);
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
@@ -808,6 +871,8 @@ enableTraining(false);
 buildCategoryControls();
 showPredictPanel(false);
 resetGruDebug();
+resetGruPredictDebug();
+toggleHyperparamVisibility(currentModelType);
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 

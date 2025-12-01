@@ -115,12 +115,14 @@ export class GruModel {
       config: this.config,
       metadata: this.metadata || null,
     };
-    localStorage.setItem(`${saveKey}_meta`, JSON.stringify(metaPayload));
+    const serialized = JSON.stringify(metaPayload);
+    localStorage.setItem(`${saveKey}_meta`, serialized);
+    localStorage.setItem(`${saveKey}_metadata_gru`, serialized);
   }
 
   static async load(key = "wta-gru-v1") {
     const model = await tf.loadLayersModel(`localstorage://${key}`);
-    const rawMeta = localStorage.getItem(`${key}_meta`);
+    const rawMeta = localStorage.getItem(`${key}_metadata_gru`) || localStorage.getItem(`${key}_meta`);
     let metaPayload = { config: {}, metadata: null };
     try {
       metaPayload = rawMeta ? JSON.parse(rawMeta) : metaPayload;
