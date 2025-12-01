@@ -41,7 +41,7 @@ export class DataLoader {
     this.sequenceFeatureCols = GRU_SEQUENCE_FEATURES.slice();
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
-      "Tournament", "Date", "Best of", "Player_1", "Player_2", "Winner", "Score",
+      "Tournament", "Date", "Best of", "Best_of", "Player_1", "Player_2", "Winner", "Score",
       "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2"
     ];
     this.labelCol = "y";
@@ -482,17 +482,11 @@ export class DataLoader {
 
   _buildSequenceFeatureList(headers) {
     const base = GRU_SEQUENCE_FEATURES.slice();
-    const baseSet = new Set(base);
-    const extras = [];
-    for (const h of headers) {
-      if (h === this.labelCol) continue;
-      if (this.dropCols.includes(h)) continue;
-      if (this.categoricalCols.includes(h)) continue;
-      if (baseSet.has(h)) continue;
-      extras.push(h);
+    const missing = base.filter((f) => !headers.includes(f));
+    if (missing.length > 0) {
+      throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);
     }
-    extras.sort();
-    return base.concat(extras);
+    return base;
   }
 
   _buildDesignMatrix(rows, featureNames = null) {
