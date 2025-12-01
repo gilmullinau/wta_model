@@ -170,10 +170,12 @@ function renderGruSummary(result, expectedFeatureCount = null, mode = currentMod
   els.gruExampleBtn.disabled = stats.numSamples === 0;
 }
 
-function renderGruExample(index = 0) {
+function renderGruExample(index = null) {
   if (!gruSequences || !gruSequences.X || gruSequences.X.length === 0) return;
-  const seq = gruSequences.X[index];
-  const info = gruSequences.meta.sampleInfo[index] || {};
+  const idx = index === null ? gruSequences.X.length - 1 : index;
+  const boundedIdx = Math.max(0, Math.min(idx, gruSequences.X.length - 1));
+  const seq = gruSequences.X[boundedIdx];
+  const info = gruSequences.meta.sampleInfo[boundedIdx] || {};
   const headers = ["Timestep", ...(gruSequences.meta.featureList || GRU_FEATURES)];
   const reversedSeq = [...seq].reverse();
   const rows = reversedSeq.map((values, i) => {
@@ -871,7 +873,7 @@ els.loadFileBtn.addEventListener("click", handleManualFileLoad);
 els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
-els.gruExampleBtn.addEventListener("click", () => renderGruExample(0));
+els.gruExampleBtn.addEventListener("click", () => renderGruExample());
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
