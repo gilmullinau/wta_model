@@ -674,9 +674,11 @@ async function trainModel() {
     return;
   }
   try {
-    if (tf?.engine) tf.engine().reset();
+    // Avoid resetting the TensorFlow engine in-browser because it can tear down
+    // the active backend and lead to undefined backend errors during GRU
+    // training. Model tensors are disposed explicitly elsewhere.
   } catch (err) {
-    console.warn("Failed to reset TensorFlow engine", err);
+    console.warn("TensorFlow readiness check failed", err);
   }
   const mode = currentModelType;
   log(`Training started in ${mode} mode...`);
