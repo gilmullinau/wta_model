@@ -134,7 +134,11 @@ header .subtitle {
 }
 
 body.mode-gru .mlp-only { display: none; }
+body.mode-gru .cnn-only { display: none; }
 body.mode-mlp .gru-only { display: none; }
+body.mode-mlp .cnn-only { display: none; }
+body.mode-cnn .mlp-only { display: none; }
+body.mode-cnn .gru-only { display: none; }
 
 .hyper-grid input[type="number"] {
   width: 100%;
@@ -278,7 +282,8 @@ label {
   display: none;
 }
 
-body.mode-gru .gru-predict-debug {
+body.mode-gru .gru-predict-debug,
+body.mode-cnn .gru-predict-debug {
   display: block;
 }
 

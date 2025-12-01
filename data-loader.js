@@ -59,13 +59,17 @@ export class DataLoader {
       modelType,
       featureList: [],
       featureIndexMap: {},
-      seqLen: modelType === "GRU" ? seqLen : null,
+      seqLen: this.isSequenceMode() ? seqLen : null,
       mean: {},
       std: {},
     };
     this._flipOnReverse = new Set([
       "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv"
     ]);
+  }
+
+  isSequenceMode() {
+    return this.modelType === "GRU" || this.modelType === "CNN";
   }
 
   async loadCSVText(csvText) {
@@ -147,7 +151,7 @@ export class DataLoader {
       for (const c of this.numericCols) {
         if (!Number.isFinite(row[c])) return;
       }
-      if (this.modelType === "GRU") {
+      if (this.isSequenceMode()) {
         for (const feat of this.sequenceFeatureCols) {
           const val = this._toNumber(row[feat]);
           if (!Number.isFinite(val)) return;
@@ -174,7 +178,7 @@ export class DataLoader {
     const { trainRows, testRows } = this._splitRowsStratified(filtered, 0.2, 42);
 
     // Fit categorical levels and scalers only on training data
-    if (this.modelType === "GRU") {
+    if (this.isSequenceMode()) {
       const featureList = this.sequenceFeatureCols.slice();
       this._validateGruFeatures(headers, featureList);
       const { mean, std } = this._computeScalerForRows(trainRows, featureList);
@@ -203,7 +207,7 @@ export class DataLoader {
 
       this.featureNames = featureList.slice();
       this.meta = {
-        modelType: "GRU",
+        modelType: this.modelType,
         featureList: featureList.slice(),
         featureIndexMap: seqTrain.meta.featureIndexMap,
         seqLen: this.seqLen,
@@ -224,7 +228,7 @@ export class DataLoader {
           featureNames: this.featureNames,
           featureCount: featureList.length,
           featureIndexMap: seqTrain.meta.featureIndexMap,
-          modelType: "GRU",
+          modelType: this.modelType,
           seqLen: this.seqLen,
           stats: seqTrain.stats,
         }
@@ -288,11 +292,11 @@ export class DataLoader {
     return this.sequenceRows.slice();
   }
 
-  buildGRUInputForMatch(player, seqLen = this.seqLen) {
-    if (this.modelType !== "GRU") {
-      throw new Error("GRU mode is required to build GRU inputs.");
+  buildSequenceInputForMatch(player, seqLen = this.seqLen) {
+    if (!this.isSequenceMode()) {
+      throw new Error("Sequence mode (GRU/CNN) is required to build inputs.");
     }
-    if (!player) throw new Error("Player name is required for GRU prediction.");
+    if (!player) throw new Error("Player name is required for sequence prediction.");
     const featureList = (this.meta.featureList && this.meta.featureList.length)
       ? this.meta.featureList.slice()
       : this.sequenceFeatureCols.slice();
@@ -336,6 +340,10 @@ export class DataLoader {
         usedRows: recent.length,
       }
     };
+  }
+
+  buildGRUInputForMatch(player, seqLen = this.seqLen) {
+    return this.buildSequenceInputForMatch(player, seqLen);
   }
 
   buildPredictSequence(player, seqLen = this.seqLen) {
@@ -783,7 +791,7 @@ export class DataLoader {
   _validateGruFeatures(headers, featureList) {
     const missing = featureList.filter((f) => !headers.includes(f));
     if (missing.length > 0) {
-      throw new Error(`Missing feature(s) for GRU: ${missing.join(", ")}`);
+      throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);
     }
   }
 

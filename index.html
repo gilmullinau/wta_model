@@ -17,7 +17,7 @@
 <body>
   <header>
     <h1>WTA Match Outcome — In-Browser Neural Network (TensorFlow.js)</h1>
-    <p class="subtitle">Train, evaluate, and debug GRU-ready sequences without leaving the browser.</p>
+    <p class="subtitle">Train, evaluate, and debug GRU/CNN-ready sequences without leaving the browser.</p>
   </header>
 
   <div class="container">
@@ -28,12 +28,13 @@
           <select id="modelTypeSelect">
             <option value="MLP" selected>MLP (tabular)</option>
             <option value="GRU">GRU (sequences)</option>
+            <option value="CNN">CNN (1D sequences)</option>
           </select>
         </label>
         <label class="gru-only">GRU Seq Length
           <input type="number" id="gruSeqLen" min="1" max="60" value="15" />
         </label>
-        <div class="small muted">GRU mode builds normalized sequences; MLP mode trains the tabular model.</div>
+        <div class="small muted">Sequence modes (GRU/CNN) build normalized windows; MLP trains the tabular model.</div>
       </div>
       <div class="row btn-row">
         <button id="trainBtn" disabled>Train Model</button>
@@ -58,6 +59,11 @@
         <label class="gru-only">GRU dropout<input type="number" id="gruDropout" value="0.2" min="0" max="0.8" step="0.05" /></label>
         <label class="gru-only">GRU learning rate<input type="number" id="gruLr" value="0.001" min="0.0001" max="0.01" step="0.0001" /></label>
         <label class="gru-only">GRU batch size<input type="number" id="gruBatch" value="64" min="8" max="512" step="8" /></label>
+        <label class="cnn-only">CNN filters<input type="number" id="cnnFilters" value="32" min="4" max="256" /></label>
+        <label class="cnn-only">CNN kernel size<input type="number" id="cnnKernel" value="3" min="2" max="9" /></label>
+        <label class="cnn-only">CNN dense units<input type="number" id="cnnDenseUnits" value="32" min="4" max="256" /></label>
+        <label class="cnn-only">CNN learning rate<input type="number" id="cnnLr" value="0.001" min="0.0001" max="0.01" step="0.0001" /></label>
+        <label class="cnn-only">CNN batch size<input type="number" id="cnnBatch" value="32" min="8" max="512" step="4" /></label>
       </div>
       <div class="small muted" style="margin-top:6px;">Tune MLP/GRU hyperparameters here; defaults are prefilled for quick runs.</div>
       <div class="metrics" id="info" style="margin-top:8px;">Loading dataset...</div>
@@ -82,9 +88,9 @@
     </div>
 
     <div class="card" id="gruDebugCard">
-      <h3 style="margin-top:0;">GRU Sequence Debug Info</h3>
+      <h3 style="margin-top:0;">Sequence Debug Info (GRU / CNN)</h3>
       <div class="gru-debug-layout">
-        <pre id="gruSummary">GRU sequences not prepared yet.</pre>
+        <pre id="gruSummary">Sequence inputs not prepared yet.</pre>
         <div class="gru-right">
           <div id="gruTensorShapes" class="small"></div>
           <button id="gruExampleBtn" type="button" disabled>Show Example Sequence</button>
@@ -128,7 +134,7 @@
       <button id="predictBtn" type="button">Predict</button>
       <div id="predictOut" style="margin-top:10px; font-weight:600;"></div>
       <div id="gruPredictDebug" class="gru-predict-debug">
-        <pre id="gruPredictSummary">GRU prediction debug will appear here in GRU mode.</pre>
+          <pre id="gruPredictSummary">Sequence prediction debug will appear here in GRU/CNN mode.</pre>
         <div class="table-wrapper"><table id="gruPredictTable" class="sequence-table"></table></div>
       </div>
     </div>

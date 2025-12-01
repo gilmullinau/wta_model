@@ -5,12 +5,14 @@ import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
 import { ModelMLP } from "./gru.js";
 import { GruModel } from "./gru-model.js";
 import { buildSequences } from "./sequence-builder.js";
+import { buildCNNModel } from "./models/cnn1d-model.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const GRU_SEQ_LEN = 15;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
+const SEQUENCE_MODES = new Set(["GRU", "CNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
@@ -24,6 +26,13 @@ const DEFAULT_GRU_CONFIG = {
   lr: 0.001,
   batchSize: 64,
 };
+const DEFAULT_CNN_CONFIG = {
+  filters: 32,
+  kernelSize: 3,
+  denseUnits: 32,
+  learningRate: 0.001,
+  batchSize: 32,
+};
 
 let loader = null;
 let model = null;
@@ -35,6 +44,7 @@ let currentAutoPayload = null;
 let gruSequences = null;
 let currentModelType = "MLP";
 let lastCSVText = null;
+let lastCnnConfig = null;
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -66,6 +76,11 @@ const els = {
   gruDropoutInput: document.getElementById("gruDropout"),
   gruLrInput: document.getElementById("gruLr"),
   gruBatchInput: document.getElementById("gruBatch"),
+  cnnFiltersInput: document.getElementById("cnnFilters"),
+  cnnKernelInput: document.getElementById("cnnKernel"),
+  cnnDenseUnitsInput: document.getElementById("cnnDenseUnits"),
+  cnnLrInput: document.getElementById("cnnLr"),
+  cnnBatchInput: document.getElementById("cnnBatch"),
   gruPredictSummary: document.getElementById("gruPredictSummary"),
   gruPredictTable: document.getElementById("gruPredictTable"),
   fileInput: document.getElementById("fileInput"),
@@ -100,18 +115,30 @@ function log(msg) {
 
 function getSelectedModelType() {
   const value = els.modelTypeSelect?.value || "MLP";
-  return value === "GRU" ? "GRU" : "MLP";
+  if (value === "GRU") return "GRU";
+  if (value === "CNN") return "CNN";
+  return "MLP";
 }
 
 function setModeClass(mode) {
-  document.body.classList.remove("mode-mlp", "mode-gru");
-  document.body.classList.add(mode === "GRU" ? "mode-gru" : "mode-mlp");
+  document.body.classList.remove("mode-mlp", "mode-gru", "mode-cnn");
+  if (mode === "GRU") document.body.classList.add("mode-gru");
+  else if (mode === "CNN") document.body.classList.add("mode-cnn");
+  else document.body.classList.add("mode-mlp");
 }
 
 function toggleHyperparamVisibility(mode) {
   setModeClass(mode);
   const isGru = mode === "GRU";
-  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = !isGru;
+  const isCnn = mode === "CNN";
+  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = !(isGru);
+  [els.cnnFiltersInput, els.cnnKernelInput, els.cnnDenseUnitsInput, els.cnnLrInput, els.cnnBatchInput].forEach((el) => {
+    if (el) el.disabled = !isCnn;
+  });
+}
+
+function isSequenceMode(mode = currentModelType) {
+  return SEQUENCE_MODES.has(mode);
 }
 
 function getSelectedSeqLen() {
@@ -125,7 +152,7 @@ function enableTraining(enabled) {
   els.saveBtn.disabled = !enabled || !model;
 }
 
-function resetGruDebug(message = "GRU sequences not prepared yet.") {
+function resetGruDebug(message = "Sequence inputs not prepared yet.") {
   gruSequences = null;
   els.gruSummary.textContent = message;
   els.gruTensorShapes.textContent = "";
@@ -135,18 +162,18 @@ function resetGruDebug(message = "GRU sequences not prepared yet.") {
   els.gruExampleBtn.disabled = true;
 }
 
-function resetGruPredictDebug(message = "GRU prediction debug will appear here in GRU mode.") {
+function resetGruPredictDebug(message = "Sequence prediction debug will appear here in GRU/CNN mode.") {
   if (els.gruPredictSummary) els.gruPredictSummary.textContent = message;
   if (els.gruPredictTable) els.gruPredictTable.innerHTML = "";
 }
 
-function renderGruSummary(result, expectedFeatureCount = null) {
+function renderGruSummary(result, expectedFeatureCount = null, mode = currentModelType) {
   const { stats, meta } = result;
   const paddingPercent = stats.paddingPercent.toFixed(1);
   const lines = [
-    "GRU MODE ENABLED",
+    `${mode} MODE ENABLED`,
     "------------------",
-    "GRU SEQUENCE DEBUG",
+    "SEQUENCE DEBUG",
     `Sequence Length: ${meta.seqLen}`,
     `Features per timestep: ${meta.numFeatures}`,
     `Total sequences: ${stats.numSamples}`,
@@ -158,7 +185,7 @@ function renderGruSummary(result, expectedFeatureCount = null) {
   els.gruTensorShapes.textContent = `X shape: [${stats.numSamples}, ${meta.seqLen}, ${meta.numFeatures}]\n` +
     `y shape: [${stats.numSamples}]\nStatus: OK`;
   if (expectedFeatureCount && meta.numFeatures < expectedFeatureCount) {
-    els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in GRU sequences.\nModel will underperform. Check featureList.`;
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in sequences.\nModel will underperform. Check featureList.`;
   } else if (meta.numFeatures < 15) {
     els.gruError.textContent = `Warning: Only ${meta.numFeatures} dynamic features provided to GRU. This may hurt accuracy.`;
   } else {
@@ -186,7 +213,7 @@ function renderGruExample(index = 0) {
 function renderGruPredictDebug(sequence, featureList, meta) {
   if (!els.gruPredictSummary || !els.gruPredictTable) return;
   const lines = [
-    "GRU PREDICTION DEBUG",
+    "SEQUENCE PREDICTION DEBUG",
     `Input shape: [1, ${loader.seqLen}, ${featureList.length}]`,
     `Player: ${meta.player || "n/a"}`,
     `Latest date: ${meta.latestDate || "n/a"}`,
@@ -238,21 +265,21 @@ async function parseAndInit(text) {
     const trainCount = dataset.X_train.shape[0];
     const testCount = dataset.X_test.shape[0];
     const featureCount = dataset.featureNames.length;
-    const modeLine = `Mode: ${currentModelType}` + (currentModelType === "GRU" ? ` | SeqLen: ${seqLen}` : "");
+    const modeLine = `Mode: ${currentModelType}` + (isSequenceMode(currentModelType) ? ` | SeqLen: ${seqLen}` : "");
     els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
-    if (currentModelType === "GRU") {
-      log(`GRU MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
+    if (isSequenceMode(currentModelType)) {
+      log(`${currentModelType} MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
       if (featureCount < 15) {
-        log(`Warning: Only ${featureCount} dynamic features provided to GRU. This may hurt accuracy.`);
+        log(`Warning: Only ${featureCount} dynamic features provided to ${currentModelType}. This may hurt accuracy.`);
       }
     } else {
       log("Dataset loaded successfully.");
     }
-    if (currentModelType === "GRU") {
+    if (isSequenceMode(currentModelType)) {
       const ok = prepareGruSequences();
       enableTraining(ok);
     } else {
-      resetGruDebug("GRU sequences available only in GRU mode.");
+      resetGruDebug("Sequence view available in GRU/CNN modes.");
       enableTraining(true);
     }
     buildPredictForm();
@@ -301,11 +328,11 @@ function handleModelTypeChange() {
 
 function prepareGruSequences() {
   if (!loader) {
-    resetGruDebug("Load a dataset to build GRU sequences.");
+    resetGruDebug("Load a dataset to build sequence inputs.");
     return false;
   }
-  if (currentModelType !== "GRU") {
-    resetGruDebug("Switch to GRU mode to build sequences.");
+  if (!isSequenceMode(currentModelType)) {
+    resetGruDebug("Switch to GRU/CNN mode to build sequences.");
     return false;
   }
   try {
@@ -320,7 +347,7 @@ function prepareGruSequences() {
     const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
     const expectedCount = Math.max(20, featureList.length);
-    renderGruSummary(result, expectedCount);
+    renderGruSummary(result, expectedCount, currentModelType);
     return true;
   } catch (err) {
     renderGruError(err.message);
@@ -474,9 +501,9 @@ function handlePlayer1Change() {
   }
 
   const { opponents, preserved } = populatePlayer2Options(player1);
-  if (currentModelType === "GRU") {
+  if (isSequenceMode()) {
     els.predictBtn.disabled = false;
-    els.matchSummary.textContent = `GRU inference will use ${player1}'s last ${loader.seqLen} matches (padded if needed).`;
+    els.matchSummary.textContent = `${currentModelType} inference will use ${player1}'s last ${loader.seqLen} matches (padded if needed).`;
   }
   if (opponents.length === 0) {
     resetAutoPredictPanel(`No recorded opponents for ${player1} in the dataset.`);
@@ -494,15 +521,15 @@ function updateAutoPreview() {
   if (!loader) return;
   const player1 = els.player1Select.value;
   const player2 = els.player2Select.value;
-  if (currentModelType === "GRU") {
+  if (isSequenceMode()) {
     if (!player1) {
-      resetAutoPredictPanel(`Select a player to build a ${SCENARIO_YEAR} GRU sequence.`);
+      resetAutoPredictPanel(`Select a player to build a ${SCENARIO_YEAR} sequence.`);
       return;
     }
-    els.matchSummary.textContent = `GRU will use ${player1}'s last ${loader.seqLen} matches (padded if too short).`;
+    els.matchSummary.textContent = `${currentModelType} will use ${player1}'s last ${loader.seqLen} matches (padded if too short).`;
     els.predictBtn.disabled = !model;
     els.featureTableBody.innerHTML = "";
-    resetGruPredictDebug("Select a player to inspect the GRU input sequence.");
+    resetGruPredictDebug("Select a player to inspect the sequence input.");
     return;
   }
   if (!player1) {
@@ -720,6 +747,41 @@ async function trainModel() {
           drawLossChart(losses, valAcc);
         }
       });
+    } else if (mode === "CNN") {
+      const hyper = readCnnHyperparameters();
+      lastCnnConfig = hyper;
+      const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
+      const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
+      console.log("CNN tensor check:", tensorsAreValid, testTensorsValid);
+      console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
+      log(`CNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
+      if (!tensorsAreValid || !testTensorsValid) {
+        log("CNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
+        throw new Error("Invalid CNN input tensors");
+      }
+      const seqLen = loader.seqLen;
+      model = buildCNNModel([seqLen, dataset.featureNames.length], {
+        filters: hyper.architecture.filters,
+        kernelSize: hyper.architecture.kernelSize,
+        denseUnits: hyper.architecture.denseUnits,
+        learningRate: hyper.architecture.learningRate,
+      });
+      await model.fit(dataset.X_train, dataset.y_train, {
+        epochs: hyper.training.epochs,
+        batchSize: hyper.training.batchSize,
+        validationSplit: hyper.validationSplit,
+        callbacks: {
+          onEpochEnd: (epoch, logs) => {
+            const val = logs.val_acc ?? logs.val_accuracy ?? 0;
+            log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${Number(logs.acc ?? logs.accuracy ?? 0).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
+            losses.push(Number(logs.loss));
+            valAcc.push(Number(val));
+            if ((epoch + 1) % 2 === 0 || epoch + 1 === hyper.training.epochs) {
+              drawLossChart(losses, valAcc);
+            }
+          }
+        }
+      });
     } else {
       const hyper = readHyperparameters();
       model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
@@ -750,13 +812,111 @@ async function trainModel() {
   }
 }
 
+async function confusionMatrixFromModel(modelInstance, X, y) {
+  const probsTensor = modelInstance.predict(X);
+  const probsData = await probsTensor.data();
+  probsTensor.dispose?.();
+  const yTrue = Array.from(await y.data());
+  let tp = 0, tn = 0, fp = 0, fn = 0;
+  for (let i = 0; i < yTrue.length; i++) {
+    const pred = probsData[i] >= 0.5 ? 1 : 0;
+    const truth = Math.round(yTrue[i]);
+    if (pred === 1 && truth === 1) tp++;
+    else if (pred === 0 && truth === 0) tn++;
+    else if (pred === 1 && truth === 0) fp++;
+    else fn++;
+  }
+  return { tp, tn, fp, fn };
+}
+
 async function evaluateModel() {
   if (!dataset || !model) return alert("Train the model first.");
   log("Evaluating on test set...");
+  if (currentModelType === "CNN") {
+    const evalOut = await model.evaluate(dataset.X_test, dataset.y_test, { batchSize: 256 });
+    const [lossTensor, accTensor] = Array.isArray(evalOut) ? evalOut : [evalOut];
+    const loss = (await lossTensor.data())[0];
+    const acc = accTensor ? (await accTensor.data())[0] : 0;
+    lossTensor.dispose();
+    accTensor?.dispose();
+    log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
+    const cm = await confusionMatrixFromModel(model, dataset.X_test, dataset.y_test);
+    drawConfusionMatrix(cm);
+    return;
+  }
   const { loss, acc } = await model.evaluate(dataset.X_test, dataset.y_test);
   log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
   const cm = await model.confusionMatrix(dataset.X_test, dataset.y_test);
   drawConfusionMatrix(cm);
+}
+
+async function saveCurrentModel() {
+  if (!model) return alert("Train a model before saving.");
+  try {
+    if (currentModelType === "CNN") {
+      const key = "tennis_model_cnn";
+      await model.save(`localstorage://${key}`);
+      const meta = {
+        modelType: "CNN",
+        seqLen: loader?.seqLen ?? getSelectedSeqLen(),
+        featureList: loader?.meta?.featureList || dataset?.featureNames || [],
+        featureIndexMap: loader?.meta?.featureIndexMap || {},
+        mean: loader?.meta?.mean || {},
+        std: loader?.meta?.std || {},
+        config: lastCnnConfig?.architecture || DEFAULT_CNN_CONFIG,
+      };
+      localStorage.setItem(`${key}_meta`, JSON.stringify(meta));
+      localStorage.setItem("metadata_cnn.json", JSON.stringify(meta));
+      log("CNN model saved to browser storage.");
+    } else if (currentModelType === "GRU") {
+      await model.save();
+      log("GRU model saved to browser storage.");
+    } else {
+      await model.save();
+      log("MLP model saved to browser storage.");
+    }
+  } catch (err) {
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+async function loadCurrentModel() {
+  try {
+    if (currentModelType === "CNN") {
+      const key = "tennis_model_cnn";
+      model = await tf.loadLayersModel(`localstorage://${key}`);
+      const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_cnn.json");
+      if (rawMeta) {
+        try {
+          const meta = JSON.parse(rawMeta);
+          if (loader) {
+            if (meta?.seqLen) loader.seqLen = meta.seqLen;
+            loader.meta = meta || loader.meta;
+          }
+          log(`Restored CNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
+        } catch (err) {
+          console.warn("Failed to parse CNN metadata", err);
+        }
+      }
+      log("CNN model loaded from browser storage.");
+    } else if (currentModelType === "GRU") {
+      const m = await GruModel.load();
+      model = m;
+      log("GRU model loaded from browser storage.");
+    } else {
+      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
+      await m.load();
+      model = m;
+      log("MLP model loaded from browser storage.");
+    }
+    showPredictPanel(true);
+    enableTraining(Boolean(dataset));
+    if (!dataset || !loader) {
+      log("Load a dataset to enable predictions with the restored model.");
+    }
+  } catch (err) {
+    alert(`No saved model found or load failed: ${err.message}`);
+  }
 }
 
 function drawLossChart(losses, valAcc) {
@@ -800,12 +960,20 @@ async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
   try {
-    if (currentModelType === "GRU") {
+    if (isSequenceMode()) {
       const player1 = els.player1Select.value;
-      if (!player1) throw new Error("Select Player 1 to build a GRU sequence.");
-      const { tensor, sequence, featureList, meta } = loader.buildGRUInputForMatch(player1, loader.seqLen);
-      if (!sequence || sequence.length === 0) throw new Error("No history available to build a GRU sequence.");
-      const prob = await model.predict(tensor);
+      if (!player1) throw new Error("Select Player 1 to build a sequence.");
+      const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, loader.seqLen);
+      if (!sequence || sequence.length === 0) throw new Error("No history available to build a sequence.");
+      let prob = 0;
+      if (currentModelType === "GRU") {
+        prob = await model.predict(tensor);
+      } else {
+        const pred = model.predict(tensor);
+        const data = await pred.data();
+        prob = data[0];
+        pred.dispose();
+      }
       const player2 = els.player2Select.value || "Player 2";
       const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
       els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
@@ -836,33 +1004,8 @@ async function handlePredict(e) {
 // Buttons
 els.trainBtn.addEventListener("click", trainModel);
 els.evalBtn.addEventListener("click", evaluateModel);
-els.saveBtn.addEventListener("click", async () => {
-  if (model) {
-    await model.save();
-    log("Model saved to browser storage.");
-  }
-});
-els.loadModelBtn.addEventListener("click", async () => {
-  try {
-    if (currentModelType === "GRU") {
-      const m = await GruModel.load();
-      model = m;
-      log("GRU model loaded from browser storage.");
-    } else {
-      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
-      await m.load();
-      model = m;
-      log("MLP model loaded from browser storage.");
-    }
-    showPredictPanel(true);
-    enableTraining(Boolean(dataset));
-    if (!dataset || !loader) {
-      log("Load a dataset to enable predictions with the restored model.");
-    }
-  } catch {
-    alert("No saved model found or load failed.");
-  }
-});
+els.saveBtn.addEventListener("click", saveCurrentModel);
+els.loadModelBtn.addEventListener("click", loadCurrentModel);
 CATEGORY_FIELDS.forEach(({ key, el }) => {
   if (!el) return;
   el.addEventListener("change", () => handleCategorySelectChange(key));
@@ -921,6 +1064,27 @@ function readGruHyperparameters() {
   return {
     training: { epochs, batchSize: clampedBatch, rawBatch },
     architecture: { units, denseUnits, dropout, lr: learningRate },
+  };
+}
+
+function readCnnHyperparameters() {
+  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const rawBatch = Number.parseInt(els.cnnBatchInput?.value ?? DEFAULT_CNN_CONFIG.batchSize, 10);
+  const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_CNN_CONFIG.batchSize);
+  const filters = clampInt(els.cnnFiltersInput?.value, 4, 256, DEFAULT_CNN_CONFIG.filters);
+  const kernelSize = clampInt(els.cnnKernelInput?.value, 2, 9, DEFAULT_CNN_CONFIG.kernelSize);
+  const denseUnits = clampInt(els.cnnDenseUnitsInput?.value, 4, 256, DEFAULT_CNN_CONFIG.denseUnits);
+  const lr = Number.parseFloat(els.cnnLrInput?.value ?? DEFAULT_CNN_CONFIG.learningRate);
+  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_CNN_CONFIG.learningRate;
+  const valSplitRaw = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
+  const validationSplit = Number.isFinite(valSplitRaw) ? Math.min(Math.max(valSplitRaw, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
+  if (filters > 64 || denseUnits > 64 || batchSize > 64 || kernelSize < 2 || kernelSize > 5) {
+    throw new Error("Too heavy configuration — running in browser. Reduce filters or batch size.");
+  }
+  return {
+    training: { epochs, batchSize, rawBatch },
+    architecture: { filters, kernelSize, denseUnits, learningRate },
+    validationSplit,
   };
 }
 
