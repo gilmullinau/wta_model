@@ -23,6 +23,18 @@
   <div class="container">
     <div class="card">
       <h3 style="margin-top:0;">Dataset & Training Controls</h3>
+      <div class="row model-row">
+        <label>Model Type
+          <select id="modelTypeSelect">
+            <option value="MLP" selected>MLP (tabular)</option>
+            <option value="GRU">GRU (sequences)</option>
+          </select>
+        </label>
+        <label>GRU Seq Length
+          <input type="number" id="gruSeqLen" min="1" max="60" value="15" />
+        </label>
+        <div class="small muted">GRU mode builds normalized sequences; MLP mode trains the tabular model.</div>
+      </div>
       <div class="row btn-row">
         <button id="trainBtn" disabled>Train Model</button>
         <button id="evalBtn" disabled>Evaluate</button>

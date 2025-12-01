@@ -1,6 +1,8 @@
 // data-loader.js
 // Reads CSV text, preprocesses: drop leakage columns, numeric scaling, one-hot for categoricals,
 // stratified split train/test, returns tf.Tensors and feature metadata.
+import { buildSequences } from "./sequence-builder.js";
+
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
 
@@ -15,27 +17,31 @@ export const GRU_SEQUENCE_FEATURES = [
   "recent_win_rate_5",
   "recent_win_rate_10",
   "rolling_win_rate_10",
-  "streak_value",
-  "streak_length",
   "fatigue_7d",
   "fatigue_14d",
   "fatigue_30d",
+  "streak_value",
+  "streak_length",
   "surface_trend",
-  "surface_win_rate_hard_5",
-  "surface_win_rate_clay_5",
-  "surface_win_rate_grass_5",
   "surface_wr_hard_5",
   "surface_wr_clay_5",
   "surface_wr_grass_5",
+  "surface_win_rate_hard_5",
+  "surface_win_rate_clay_5",
+  "surface_win_rate_grass_5",
   "recent_surface_wr",
 ];
 
 export class DataLoader {
-  constructor() {
-    this.numericCols = [
+  constructor(modelType = "MLP", seqLen = 15) {
+    this.modelType = modelType;
+    this.seqLen = seqLen;
+    this.featureListMLP = [
       "rank_diff", "pts_diff", "odd_diff",
       "h2h_advantage", "last_winner", "surface_winrate_adv", "year"
     ];
+    this.featureListGRU = GRU_SEQUENCE_FEATURES.slice();
+    this.numericCols = this.featureListMLP.slice();
     this.sequenceFeatureCols = GRU_SEQUENCE_FEATURES.slice();
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
@@ -53,6 +59,13 @@ export class DataLoader {
     this.playerStats = new Map();
     this.categoryOptions = new Map();
     this.sequenceRows = [];
+    this.meta = {
+      modelType,
+      featureList: [],
+      seqLen: modelType === "GRU" ? seqLen : null,
+      mean: {},
+      std: {},
+    };
     this._flipOnReverse = new Set([
       "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv"
     ]);
@@ -137,17 +150,26 @@ export class DataLoader {
       for (const c of this.numericCols) {
         if (!Number.isFinite(row[c])) return;
       }
-      filtered.push(row);
-      filteredMeta.push(metaRows[idx]);
+      if (this.modelType === "GRU") {
+        for (const feat of this.sequenceFeatureCols) {
+          const val = this._toNumber(row[feat]);
+          if (!Number.isFinite(val)) return;
+        }
+      }
+      const meta = metaRows[idx];
+      const augmented = {
+        ...row,
+        player: meta.player1,
+        player1: meta.player1,
+        player2: meta.player2,
+        date: meta.date,
+        timestamp: meta.timestamp,
+        __meta: meta,
+      };
+      filtered.push(augmented);
+      filteredMeta.push(meta);
     });
-    this.sequenceRows = filteredMeta.map((meta, i) => ({
-      ...filtered[i],
-      player: meta.player1,
-      player1: meta.player1,
-      player2: meta.player2,
-      date: meta.date,
-      timestamp: meta.timestamp,
-    }));
+    this.sequenceRows = filtered.map((row) => ({ ...row }));
     this._prepareMatchIndex(filteredMeta);
     if (filtered.length < 10) throw new Error(`Too few valid rows: ${filtered.length}`);
 
@@ -155,6 +177,51 @@ export class DataLoader {
     const { trainRows, testRows } = this._splitRowsStratified(filtered, 0.2, 42);
 
     // Fit categorical levels and scalers only on training data
+    if (this.modelType === "GRU") {
+      const featureList = this.sequenceFeatureCols.slice();
+      this._validateGruFeatures(headers, featureList);
+      const { mean, std } = this._computeScalerForRows(trainRows, featureList);
+      const normalizeRows = (rows) => this._normalizeRowsForGru(rows, mean, std, featureList);
+      const normalizedTrain = normalizeRows(trainRows);
+      const normalizedTest = normalizeRows(testRows);
+      const normalizedAll = normalizeRows(filtered);
+      this.sequenceRows = normalizedAll;
+      const seqTrain = buildSequences(normalizedTrain, this.seqLen, featureList);
+      const seqTest = buildSequences(normalizedTest, this.seqLen, featureList);
+
+      if (seqTrain.stats.paddingPercent > 90) {
+        throw new Error("Sequence length exceeds available match history for most players");
+      }
+
+      const X_train = tf.tensor3d(seqTrain.X, [seqTrain.stats.numSamples, this.seqLen, featureList.length], "float32");
+      const y_train = tf.tensor1d(seqTrain.y, "float32");
+      const X_test = tf.tensor3d(seqTest.X, [seqTest.stats.numSamples, this.seqLen, featureList.length], "float32");
+      const y_test = tf.tensor1d(seqTest.y, "float32");
+
+      this.featureNames = featureList.slice();
+      this.meta = {
+        modelType: "GRU",
+        featureList: featureList.slice(),
+        seqLen: this.seqLen,
+        mean,
+        std
+      };
+
+      return {
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        featureNames: this.featureNames,
+        artifacts: {
+          scaler: { mean, std },
+          featureNames: this.featureNames,
+          modelType: "GRU",
+          seqLen: this.seqLen
+        }
+      };
+    }
+
     this._fitCategoricals(trainRows);
     const { X: X_train_raw, y: y_train, featureNames } = this._buildDesignMatrix(trainRows);
     this.featureNames = featureNames;
@@ -170,6 +237,14 @@ export class DataLoader {
     const xTestTensor = tf.tensor2d(X_test_scaled, [X_test_scaled.length, featureNames.length], "float32");
     const yTestTensor = tf.tensor2d(y_test.map(v => [v]), [y_test.length, 1], "float32");
 
+    this.meta = {
+      modelType: "MLP",
+      featureList: this.featureNames.slice(),
+      seqLen: null,
+      mean: this.scaler.mean,
+      std: this.scaler.std,
+    };
+
     return {
       X_train: xTrainTensor, y_train: yTrainTensor,
       X_test: xTestTensor, y_test: yTestTensor,
@@ -179,7 +254,9 @@ export class DataLoader {
         scaler: this.scaler,
         numericCols: this.numericCols,
         categoricalCols: this.categoricalCols,
-        featureNames: this.featureNames
+        featureNames: this.featureNames,
+        modelType: "MLP",
+        seqLen: null,
       }
     };
   }
@@ -604,5 +681,52 @@ export class DataLoader {
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
+  }
+
+  _validateGruFeatures(headers, featureList) {
+    const missing = featureList.filter((f) => !headers.includes(f));
+    if (missing.length > 0) {
+      throw new Error(`Missing feature(s) for GRU: ${missing.join(", ")}`);
+    }
+  }
+
+  _computeScalerForRows(rows, featureList) {
+    const mean = {}, std = {};
+    featureList.forEach((f) => {
+      let sum = 0, sumSq = 0, count = 0;
+      for (const r of rows) {
+        const v = this._toNumber(r[f]);
+        if (!Number.isFinite(v)) {
+          throw new Error(`Missing feature ${f} in dataset`);
+        }
+        sum += v;
+        sumSq += v * v;
+        count += 1;
+      }
+      const mu = sum / Math.max(1, count);
+      const variance = Math.max(0, sumSq / Math.max(1, count) - mu * mu);
+      mean[f] = mu;
+      std[f] = Math.sqrt(variance);
+    });
+    return { mean, std };
+  }
+
+  _normalizeRowsForGru(rows, mean, std, featureList) {
+    return rows.map((row) => {
+      const normalized = { ...row };
+      featureList.forEach((f) => {
+        const raw = this._toNumber(row[f]);
+        if (!Number.isFinite(raw)) {
+          throw new Error(`Missing feature ${f} in dataset`);
+        }
+        const mu = mean[f] ?? 0;
+        const sigma = std[f] ?? 1;
+        const val = sigma === 0 ? 0 : (raw - mu) / sigma;
+        normalized[f] = Number.isFinite(val) ? val : 0;
+      });
+      normalized.y = Math.round(row[this.labelCol]);
+      if (!Number.isFinite(normalized.y)) normalized.y = 0;
+      return normalized;
+    });
   }
 }

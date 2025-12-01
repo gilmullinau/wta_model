@@ -25,6 +25,7 @@ let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
 let gruSequences = null;
+let currentModelType = "MLP";
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -60,6 +61,8 @@ const els = {
   layer2Input: document.getElementById("layer2Units"),
   dropoutInput: document.getElementById("dropoutRate"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
+  modelTypeSelect: document.getElementById("modelTypeSelect"),
+  gruSeqLenInput: document.getElementById("gruSeqLen"),
 };
 
 const CATEGORY_FIELDS = [
@@ -77,6 +80,16 @@ function log(msg) {
     els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
   }
   els.logs.scrollTop = els.logs.scrollHeight;
+}
+
+function getSelectedModelType() {
+  const value = els.modelTypeSelect?.value || "MLP";
+  return value === "GRU" ? "GRU" : "MLP";
+}
+
+function getSelectedSeqLen() {
+  const val = parseInt(els.gruSeqLenInput?.value ?? GRU_SEQ_LEN, 10);
+  return Number.isInteger(val) && val > 0 ? val : GRU_SEQ_LEN;
 }
 
 function enableTraining(enabled) {
@@ -99,19 +112,23 @@ function renderGruSummary(result, expectedFeatureCount = null) {
   const { stats, meta } = result;
   const paddingPercent = stats.paddingPercent.toFixed(1);
   const lines = [
-    "GRU SEQUENCE DEBUG",
+    "GRU MODE ENABLED",
     "------------------",
+    "GRU SEQUENCE DEBUG",
     `Sequence Length: ${meta.seqLen}`,
     `Features per timestep: ${meta.numFeatures}`,
     `Total sequences: ${stats.numSamples}`,
     `Sequences with padding: ${paddingPercent}%`,
     `NaN detected: ${stats.hasNaN ? "YES" : "NO"}`,
+    "Normalization: mean/std applied",
   ];
   els.gruSummary.textContent = lines.join("\n");
   els.gruTensorShapes.textContent = `X shape: [${stats.numSamples}, ${meta.seqLen}, ${meta.numFeatures}]\n` +
     `y shape: [${stats.numSamples}]\nStatus: OK`;
   if (expectedFeatureCount && meta.numFeatures < expectedFeatureCount) {
     els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in GRU sequences.\nModel will underperform. Check featureList.`;
+  } else if (meta.numFeatures < 15) {
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures} dynamic features provided to GRU. This may hurt accuracy.`;
   } else {
     els.gruError.textContent = "";
   }
@@ -160,12 +177,23 @@ async function parseAndInit(text) {
     if (lossChart) { lossChart.destroy(); lossChart = null; }
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     resetGruDebug();
-    loader = new DataLoader();
+    currentModelType = getSelectedModelType();
+    const seqLen = getSelectedSeqLen();
+    loader = new DataLoader(currentModelType, seqLen);
     dataset = await loader.loadCSVText(text);
-    els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
+    const trainCount = dataset.X_train.shape[0];
+    const testCount = dataset.X_test.shape[0];
+    const featureCount = dataset.featureNames.length;
+    const modeLine = `Mode: ${currentModelType}` + (currentModelType === "GRU" ? ` | SeqLen: ${seqLen}` : "");
+    els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
     log("Dataset loaded successfully.");
-    prepareGruSequences();
-    enableTraining(true);
+    if (currentModelType === "GRU") {
+      prepareGruSequences();
+      enableTraining(false);
+    } else {
+      resetGruDebug("GRU sequences available only in GRU mode.");
+      enableTraining(true);
+    }
     buildPredictForm();
     els.saveBtn.disabled = true;
     showPredictPanel(false);
@@ -203,6 +231,10 @@ function prepareGruSequences() {
     resetGruDebug("Load a dataset to build GRU sequences.");
     return;
   }
+  if (currentModelType !== "GRU") {
+    resetGruDebug("Switch to GRU mode to build sequences.");
+    return;
+  }
   try {
     const rows = loader.getSequenceRows();
     const featureList = loader.getSequenceFeatureList();
@@ -210,7 +242,9 @@ function prepareGruSequences() {
       resetGruDebug("No rows available for GRU sequence builder.");
       return;
     }
-    const result = buildSequences(rows, GRU_SEQ_LEN, featureList);
+    const seqLen = getSelectedSeqLen();
+    loader.seqLen = seqLen;
+    const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
     renderGruSummary(result, featureList.length);
   } catch (err) {
@@ -535,6 +569,10 @@ function isFiniteNumber(value) {
 
 async function trainModel() {
   if (!dataset) return alert("Dataset not loaded yet.");
+  if (currentModelType === "GRU") {
+    alert("GRU training is not enabled yet. Use GRU mode to inspect sequences and switch to MLP for training.");
+    return;
+  }
   if (model) model.dispose();
   const hyper = readHyperparameters();
   model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
