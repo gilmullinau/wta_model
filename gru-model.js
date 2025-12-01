@@ -41,6 +41,7 @@ export class GruModel {
   }
 
   async train(X_train, y_train, X_val, y_val, { epochs = 6, batchSize = 64, onEpochEnd = null } = {}) {
+    await tf.ready();
     if (!this.model) throw new Error("Model not built. Call build() first.");
     if (!(X_train instanceof tf.Tensor) || !(y_train instanceof tf.Tensor)) {
       throw new Error("GRU training requires tensor inputs.");

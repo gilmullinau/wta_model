@@ -664,6 +664,16 @@ async function trainModel() {
     model.dispose();
   }
   try {
+    await tf.ready();
+    if (typeof tf.getBackend === "function") {
+      console.log("TensorFlow backend:", tf.getBackend());
+    }
+  } catch (err) {
+    console.error("TensorFlow not ready", err);
+    alert("TensorFlow.js failed to initialize. Check network and reload page.");
+    return;
+  }
+  try {
     if (tf?.engine) tf.engine().reset();
   } catch (err) {
     console.warn("Failed to reset TensorFlow engine", err);
