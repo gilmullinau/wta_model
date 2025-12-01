@@ -63,6 +63,24 @@
       <pre id="logs"></pre>
     </div>
 
+    <div class="card" id="gruDebugCard">
+      <h3 style="margin-top:0;">GRU Sequence Debug Info</h3>
+      <div class="gru-debug-layout">
+        <pre id="gruSummary">GRU sequences not prepared yet.</pre>
+        <div class="gru-right">
+          <div id="gruTensorShapes" class="small"></div>
+          <button id="gruExampleBtn" type="button" disabled>Show Example Sequence</button>
+          <div id="gruError" class="error-text"></div>
+        </div>
+      </div>
+      <div class="gru-example">
+        <div id="gruExampleMeta" class="small"></div>
+        <div class="table-wrapper">
+          <table id="gruExampleTable" class="sequence-table"></table>
+        </div>
+      </div>
+    </div>
+
     <div class="card" id="predictPanel">
       <h3 style="margin-top:0;">Predict Future Match</h3>
       <div class="player-select-grid">

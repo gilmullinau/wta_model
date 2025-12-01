@@ -25,6 +25,7 @@ export class DataLoader {
     this.opponentMap = new Map();
     this.playerStats = new Map();
     this.categoryOptions = new Map();
+    this.sequenceRows = [];
     this._flipOnReverse = new Set([
       "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv"
     ]);
@@ -105,6 +106,14 @@ export class DataLoader {
       filtered.push(row);
       filteredMeta.push(metaRows[idx]);
     });
+    this.sequenceRows = filteredMeta.map((meta, i) => ({
+      ...filtered[i],
+      player: meta.player1,
+      player1: meta.player1,
+      player2: meta.player2,
+      date: meta.date,
+      timestamp: meta.timestamp,
+    }));
     this._prepareMatchIndex(filteredMeta);
     if (filtered.length < 10) throw new Error(`Too few valid rows: ${filtered.length}`);
 
@@ -149,6 +158,10 @@ export class DataLoader {
     if (!player) return [];
     const opponents = this.opponentMap.get(player);
     return opponents ? opponents.slice() : [];
+  }
+
+  getSequenceRows() {
+    return this.sequenceRows.slice();
   }
 
   getPlayerSnapshot(player) {

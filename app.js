@@ -3,10 +3,21 @@
 
 import { DataLoader } from "./data-loader.js";
 import { ModelMLP } from "./gru.js";
+import { buildSequences } from "./sequence-builder.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
+const GRU_SEQ_LEN = 15;
+const GRU_FEATURES = [
+  "rank_diff",
+  "pts_diff",
+  "odd_diff",
+  "h2h_advantage",
+  "last_winner",
+  "surface_winrate_adv",
+  "year"
+];
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
@@ -21,6 +32,7 @@ let lossChart = null;
 let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
+let gruSequences = null;
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -41,6 +53,12 @@ const els = {
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
+  gruSummary: document.getElementById("gruSummary"),
+  gruExampleBtn: document.getElementById("gruExampleBtn"),
+  gruExampleTable: document.getElementById("gruExampleTable"),
+  gruExampleMeta: document.getElementById("gruExampleMeta"),
+  gruTensorShapes: document.getElementById("gruTensorShapes"),
+  gruError: document.getElementById("gruError"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
@@ -75,6 +93,58 @@ function enableTraining(enabled) {
   els.saveBtn.disabled = !enabled || !model;
 }
 
+function resetGruDebug(message = "GRU sequences not prepared yet.") {
+  gruSequences = null;
+  els.gruSummary.textContent = message;
+  els.gruTensorShapes.textContent = "";
+  els.gruExampleMeta.textContent = "";
+  els.gruExampleTable.innerHTML = "";
+  els.gruError.textContent = "";
+  els.gruExampleBtn.disabled = true;
+}
+
+function renderGruSummary(result) {
+  const { stats, meta } = result;
+  const paddingPercent = stats.paddingPercent.toFixed(1);
+  const lines = [
+    "GRU SEQUENCE DEBUG",
+    "------------------",
+    `Sequence Length: ${meta.seqLen}`,
+    `Features per timestep: ${meta.numFeatures}`,
+    `Total sequences: ${stats.numSamples}`,
+    `Sequences with padding: ${paddingPercent}%`,
+    `NaN detected: ${stats.hasNaN ? "YES" : "NO"}`,
+  ];
+  els.gruSummary.textContent = lines.join("\n");
+  els.gruTensorShapes.textContent = `X shape: [${stats.numSamples}, ${meta.seqLen}, ${meta.numFeatures}]\n` +
+    `y shape: [${stats.numSamples}]\nStatus: OK`;
+  els.gruError.textContent = "";
+  els.gruExampleBtn.disabled = stats.numSamples === 0;
+}
+
+function renderGruExample(index = 0) {
+  if (!gruSequences || !gruSequences.X || gruSequences.X.length === 0) return;
+  const seq = gruSequences.X[index];
+  const info = gruSequences.meta.sampleInfo[index] || {};
+  const headers = ["Timestep", ...(gruSequences.meta.featureList || GRU_FEATURES)];
+  const rows = seq.map((values, i) => {
+    const cells = [`<td>${i + 1}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+    return `<tr>${cells.join("")}</tr>`;
+  });
+  const headerCells = headers.map((h) => `<th>${h}</th>`);
+  els.gruExampleTable.innerHTML = `<thead><tr>${headerCells.join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const player = info.player || "Unknown";
+  const date = info.date || "n/a";
+  els.gruExampleMeta.textContent = `Target y = ${info.label ?? "?"} | Match date = ${date} | Player = ${player}`;
+}
+
+function renderGruError(message) {
+  els.gruError.textContent = `SEQUENCE BUILDER ERROR:\n${message}`;
+  els.gruSummary.textContent = "GRU SEQUENCE DEBUG\n------------------\nSequence builder failed.";
+  els.gruTensorShapes.textContent = "";
+  els.gruExampleBtn.disabled = true;
+}
+
 function showPredictPanel(show) {
   els.predictPanel.style.display = show ? "block" : "none";
   if (!show) {
@@ -93,10 +163,12 @@ async function parseAndInit(text) {
     }
     if (lossChart) { lossChart.destroy(); lossChart = null; }
     if (cmChart) { cmChart.destroy(); cmChart = null; }
+    resetGruDebug();
     loader = new DataLoader();
     dataset = await loader.loadCSVText(text);
     els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
     log("Dataset loaded successfully.");
+    prepareGruSequences();
     enableTraining(true);
     buildPredictForm();
     els.saveBtn.disabled = true;
@@ -127,6 +199,26 @@ async function autoLoadCSV() {
     console.error("❌ Auto-load failed:", err);
     log(`Auto-load failed: ${err.message}`);
     els.info.textContent = "Failed to auto-load wta_data.csv from project root. Use manual upload below.";
+  }
+}
+
+function prepareGruSequences() {
+  if (!loader) {
+    resetGruDebug("Load a dataset to build GRU sequences.");
+    return;
+  }
+  try {
+    const rows = loader.getSequenceRows();
+    if (!rows || rows.length === 0) {
+      resetGruDebug("No rows available for GRU sequence builder.");
+      return;
+    }
+    const result = buildSequences(rows, GRU_SEQ_LEN, GRU_FEATURES);
+    gruSequences = result;
+    renderGruSummary(result);
+  } catch (err) {
+    renderGruError(err.message);
+    log(`Sequence builder error: ${err.message}`);
   }
 }
 
@@ -581,12 +673,14 @@ els.loadFileBtn.addEventListener("click", handleManualFileLoad);
 els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
+els.gruExampleBtn.addEventListener("click", () => renderGruExample(0));
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
 enableTraining(false);
 buildCategoryControls();
 showPredictPanel(false);
+resetGruDebug();
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 

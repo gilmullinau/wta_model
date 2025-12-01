@@ -194,6 +194,54 @@ label {
   margin-bottom: 6px;
 }
 
+.gru-debug-layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.gru-right {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gru-example {
+  margin-top: 10px;
+}
+
+.sequence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.sequence-table th,
+.sequence-table td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 4px 6px;
+  text-align: right;
+}
+
+.sequence-table th:first-child,
+.sequence-table td:first-child {
+  text-align: left;
+}
+
+.table-wrapper {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.error-text {
+  color: #ff7b7b;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+
 .feature-table {
   width: 100%;
   border-collapse: collapse;
@@ -255,5 +303,8 @@ label {
   }
   .file-row .small {
     margin-left: 0;
+  }
+  .gru-debug-layout {
+    grid-template-columns: 1fr;
   }
 }
