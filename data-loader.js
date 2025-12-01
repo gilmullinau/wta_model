@@ -4,12 +4,35 @@
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
 
+export const GRU_SEQUENCE_FEATURES = [
+  "rank_diff",
+  "pts_diff",
+  "odd_diff",
+  "h2h_advantage",
+  "last_winner",
+  "surface_winrate_adv",
+  "year",
+  "recent_win_rate_5",
+  "recent_win_rate_10",
+  "rolling_win_rate_10",
+  "streak_value",
+  "streak_length",
+  "fatigue_7d",
+  "fatigue_14d",
+  "fatigue_30d",
+  "surface_trend",
+  "surface_win_rate_hard_5",
+  "surface_win_rate_clay_5",
+  "surface_win_rate_grass_5",
+];
+
 export class DataLoader {
   constructor() {
     this.numericCols = [
       "rank_diff", "pts_diff", "odd_diff",
       "h2h_advantage", "last_winner", "surface_winrate_adv", "year"
     ];
+    this.sequenceFeatureCols = GRU_SEQUENCE_FEATURES.slice();
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
       "Tournament", "Date", "Best of", "Player_1", "Player_2", "Winner", "Score",
@@ -85,6 +108,11 @@ export class DataLoader {
         const num = this._toNumber(row[c]);
         row[c] = num;
         meta.numeric[c] = num;
+      }
+      for (const c of this.sequenceFeatureCols) {
+        const num = this._toNumber(row[c]);
+        row[c] = Number.isFinite(num) ? num : 0;
+        meta.numeric[c] = row[c];
       }
       for (const col of this.categoricalCols) {
         const str = (row[col] ?? "").toString().trim();

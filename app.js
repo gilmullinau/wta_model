@@ -1,7 +1,7 @@
 // app.js — WTA Match Outcome predictor
 // Loads TensorFlow.js (global tf), dataset from wta_data.csv, trains MLP model, visualizes metrics.
 
-import { DataLoader } from "./data-loader.js";
+import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
 import { ModelMLP } from "./gru.js";
 import { buildSequences } from "./sequence-builder.js";
 
@@ -9,15 +9,7 @@ const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const GRU_SEQ_LEN = 15;
-const GRU_FEATURES = [
-  "rank_diff",
-  "pts_diff",
-  "odd_diff",
-  "h2h_advantage",
-  "last_winner",
-  "surface_winrate_adv",
-  "year"
-];
+const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
