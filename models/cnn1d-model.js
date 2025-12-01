@@ -15,14 +15,14 @@ export function buildCNNModel(inputShape, config = {}) {
     filters: cfg.filters,
     kernelSize: cfg.kernelSize,
     activation: "relu",
-    padding: "causal",
+    padding: "same",
   }));
 
   model.add(tf.layers.conv1d({
     filters: cfg.filters,
     kernelSize: cfg.kernelSize,
     activation: "relu",
-    padding: "causal",
+    padding: "same",
   }));
 
   model.add(tf.layers.globalAveragePooling1d());

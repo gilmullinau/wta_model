@@ -2,8 +2,6 @@
 // Loads TensorFlow.js (global tf), dataset from wta_data.csv, trains MLP model, visualizes metrics.
 
 import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
-import { ModelMLP } from "./gru.js";
-import { GruModel } from "./gru-model.js";
 import { buildSequences } from "./sequence-builder.js";
 import { buildCNNModel } from "./models/cnn1d-model.js";
 
@@ -12,19 +10,12 @@ const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const GRU_SEQ_LEN = 15;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
-const SEQUENCE_MODES = new Set(["GRU", "CNN"]);
+const SEQUENCE_MODES = new Set(["CNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
   hiddenUnits: [128, 64],
   dropout: 0.3,
-};
-const DEFAULT_GRU_CONFIG = {
-  units: 64,
-  denseUnits: 32,
-  dropout: 0.2,
-  lr: 0.001,
-  batchSize: 64,
 };
 const DEFAULT_CNN_CONFIG = {
   filters: 32,
@@ -42,7 +33,7 @@ let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
 let gruSequences = null;
-let currentModelType = "MLP";
+let currentModelType = "CNN";
 let lastCSVText = null;
 let lastCnnConfig = null;
 
@@ -71,11 +62,6 @@ const els = {
   gruExampleMeta: document.getElementById("gruExampleMeta"),
   gruTensorShapes: document.getElementById("gruTensorShapes"),
   gruError: document.getElementById("gruError"),
-  gruUnitsInput: document.getElementById("gruUnits"),
-  gruDenseUnitsInput: document.getElementById("gruDenseUnits"),
-  gruDropoutInput: document.getElementById("gruDropout"),
-  gruLrInput: document.getElementById("gruLr"),
-  gruBatchInput: document.getElementById("gruBatch"),
   cnnFiltersInput: document.getElementById("cnnFilters"),
   cnnKernelInput: document.getElementById("cnnKernel"),
   cnnDenseUnitsInput: document.getElementById("cnnDenseUnits"),
@@ -86,13 +72,8 @@ const els = {
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
-  batchSizeInput: document.getElementById("batchSizeInput"),
   valSplitInput: document.getElementById("valSplitInput"),
-  layer1Input: document.getElementById("layer1Units"),
-  layer2Input: document.getElementById("layer2Units"),
-  dropoutInput: document.getElementById("dropoutRate"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
-  modelTypeSelect: document.getElementById("modelTypeSelect"),
   gruSeqLenInput: document.getElementById("gruSeqLen"),
 };
 
@@ -114,10 +95,7 @@ function log(msg) {
 }
 
 function getSelectedModelType() {
-  const value = els.modelTypeSelect?.value || "MLP";
-  if (value === "GRU") return "GRU";
-  if (value === "CNN") return "CNN";
-  return "MLP";
+  return "CNN";
 }
 
 function setModeClass(mode) {
@@ -129,11 +107,9 @@ function setModeClass(mode) {
 
 function toggleHyperparamVisibility(mode) {
   setModeClass(mode);
-  const isGru = mode === "GRU";
-  const isCnn = mode === "CNN";
-  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = !(isGru);
+  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = mode !== "CNN";
   [els.cnnFiltersInput, els.cnnKernelInput, els.cnnDenseUnitsInput, els.cnnLrInput, els.cnnBatchInput].forEach((el) => {
-    if (el) el.disabled = !isCnn;
+    if (el) el.disabled = mode !== "CNN";
   });
 }
 
@@ -162,7 +138,7 @@ function resetGruDebug(message = "Sequence inputs not prepared yet.") {
   els.gruExampleBtn.disabled = true;
 }
 
-function resetGruPredictDebug(message = "Sequence prediction debug will appear here in GRU/CNN mode.") {
+function resetGruPredictDebug(message = "Sequence prediction debug will appear here in CNN mode.") {
   if (els.gruPredictSummary) els.gruPredictSummary.textContent = message;
   if (els.gruPredictTable) els.gruPredictTable.innerHTML = "";
 }
@@ -187,7 +163,7 @@ function renderGruSummary(result, expectedFeatureCount = null, mode = currentMod
   if (expectedFeatureCount && meta.numFeatures < expectedFeatureCount) {
     els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in sequences.\nModel will underperform. Check featureList.`;
   } else if (meta.numFeatures < 15) {
-    els.gruError.textContent = `Warning: Only ${meta.numFeatures} dynamic features provided to GRU. This may hurt accuracy.`;
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures} dynamic features provided to the sequence model. This may hurt accuracy.`;
   } else {
     els.gruError.textContent = "";
   }
@@ -231,7 +207,7 @@ function renderGruPredictDebug(sequence, featureList, meta) {
 
 function renderGruError(message) {
   els.gruError.textContent = `SEQUENCE BUILDER ERROR:\n${message}`;
-  els.gruSummary.textContent = "GRU SEQUENCE DEBUG\n------------------\nSequence builder failed.";
+  els.gruSummary.textContent = "SEQUENCE DEBUG\n------------------\nSequence builder failed.";
   els.gruTensorShapes.textContent = "";
   els.gruExampleBtn.disabled = true;
 }
@@ -256,7 +232,7 @@ async function parseAndInit(text) {
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     resetGruDebug();
     resetGruPredictDebug();
-    currentModelType = getSelectedModelType();
+    currentModelType = "CNN";
     toggleHyperparamVisibility(currentModelType);
     const seqLen = getSelectedSeqLen();
     loader = new DataLoader(currentModelType, seqLen);
@@ -267,21 +243,12 @@ async function parseAndInit(text) {
     const featureCount = dataset.featureNames.length;
     const modeLine = `Mode: ${currentModelType}` + (isSequenceMode(currentModelType) ? ` | SeqLen: ${seqLen}` : "");
     els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
-    if (isSequenceMode(currentModelType)) {
-      log(`${currentModelType} MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
-      if (featureCount < 15) {
-        log(`Warning: Only ${featureCount} dynamic features provided to ${currentModelType}. This may hurt accuracy.`);
-      }
-    } else {
-      log("Dataset loaded successfully.");
+    log(`${currentModelType} MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
+    if (featureCount < 15) {
+      log(`Warning: Only ${featureCount} dynamic features provided to ${currentModelType}. This may hurt accuracy.`);
     }
-    if (isSequenceMode(currentModelType)) {
-      const ok = prepareGruSequences();
-      enableTraining(ok);
-    } else {
-      resetGruDebug("Sequence view available in GRU/CNN modes.");
-      enableTraining(true);
-    }
+    const ok = prepareGruSequences();
+    enableTraining(ok);
     buildPredictForm();
     els.saveBtn.disabled = true;
     showPredictPanel(false);
@@ -314,32 +281,16 @@ async function autoLoadCSV() {
   }
 }
 
-function handleModelTypeChange() {
-  const mode = getSelectedModelType();
-  currentModelType = mode;
-  toggleHyperparamVisibility(mode);
-  console.log(`Model type changed to ${mode}`);
-  resetGruDebug();
-  resetGruPredictDebug();
-  if (lastCSVText) {
-    parseAndInit(lastCSVText);
-  }
-}
-
 function prepareGruSequences() {
   if (!loader) {
     resetGruDebug("Load a dataset to build sequence inputs.");
-    return false;
-  }
-  if (!isSequenceMode(currentModelType)) {
-    resetGruDebug("Switch to GRU/CNN mode to build sequences.");
     return false;
   }
   try {
     const rows = loader.getSequenceRows();
     const featureList = loader.getSequenceFeatureList();
     if (!rows || rows.length === 0) {
-      resetGruDebug("No rows available for GRU sequence builder.");
+      resetGruDebug("No rows available for sequence builder.");
       return false;
     }
     const seqLen = getSelectedSeqLen();
@@ -702,8 +653,8 @@ async function trainModel() {
   }
   try {
     // Avoid resetting the TensorFlow engine in-browser because it can tear down
-    // the active backend and lead to undefined backend errors during GRU
-    // training. Model tensors are disposed explicitly elsewhere.
+    // the active backend and lead to undefined backend errors during
+    // sequence training. Model tensors are disposed explicitly elsewhere.
   } catch (err) {
     console.warn("TensorFlow readiness check failed", err);
   }
@@ -712,93 +663,40 @@ async function trainModel() {
   const losses = [], valAcc = [];
   enableTraining(false);
   try {
-    if (mode === "GRU") {
-      const hyper = readGruHyperparameters();
-      if (hyper.training.rawBatch > 64) {
-        log("Batch size too large for GRU; capped at 64 to avoid WebGL OOM.");
-      }
-      const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
-      const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
-      console.log("GRU tensor check:", tensorsAreValid, testTensorsValid);
-      console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
-      log(`GRU tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
-      if (!tensorsAreValid || !testTensorsValid) {
-        log("GRU ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
-        throw new Error("Invalid GRU input tensors");
-      }
-      model = new GruModel({
-        units: hyper.architecture.units,
-        denseUnits: hyper.architecture.denseUnits,
-        dropout: hyper.architecture.dropout,
-        lr: hyper.architecture.lr,
-      });
-      model.build([loader.seqLen, dataset.featureNames.length]);
-      console.log("Model summary:");
-      model.model.summary();
-      model.setMetadata(loader.meta);
-      await model.train(dataset.X_train, dataset.y_train, dataset.X_test, dataset.y_test, {
-        epochs: hyper.training.epochs,
-        batchSize: hyper.training.batchSize,
+    const hyper = readCnnHyperparameters();
+    lastCnnConfig = hyper;
+    const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
+    const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
+    console.log("CNN tensor check:", tensorsAreValid, testTensorsValid);
+    console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
+    log(`CNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
+    if (!tensorsAreValid || !testTensorsValid) {
+      log("CNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
+      throw new Error("Invalid CNN input tensors");
+    }
+    const seqLen = loader.seqLen;
+    model = buildCNNModel([seqLen, dataset.featureNames.length], {
+      filters: hyper.architecture.filters,
+      kernelSize: hyper.architecture.kernelSize,
+      denseUnits: hyper.architecture.denseUnits,
+      learningRate: hyper.architecture.learningRate,
+    });
+    await model.fit(dataset.X_train, dataset.y_train, {
+      epochs: hyper.training.epochs,
+      batchSize: hyper.training.batchSize,
+      validationSplit: hyper.validationSplit,
+      callbacks: {
         onEpochEnd: (epoch, logs) => {
           const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
+          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${Number(logs.acc ?? logs.accuracy ?? 0).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
           losses.push(Number(logs.loss));
           valAcc.push(Number(val));
-          drawLossChart(losses, valAcc);
-        }
-      });
-    } else if (mode === "CNN") {
-      const hyper = readCnnHyperparameters();
-      lastCnnConfig = hyper;
-      const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
-      const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
-      console.log("CNN tensor check:", tensorsAreValid, testTensorsValid);
-      console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
-      log(`CNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
-      if (!tensorsAreValid || !testTensorsValid) {
-        log("CNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
-        throw new Error("Invalid CNN input tensors");
-      }
-      const seqLen = loader.seqLen;
-      model = buildCNNModel([seqLen, dataset.featureNames.length], {
-        filters: hyper.architecture.filters,
-        kernelSize: hyper.architecture.kernelSize,
-        denseUnits: hyper.architecture.denseUnits,
-        learningRate: hyper.architecture.learningRate,
-      });
-      await model.fit(dataset.X_train, dataset.y_train, {
-        epochs: hyper.training.epochs,
-        batchSize: hyper.training.batchSize,
-        validationSplit: hyper.validationSplit,
-        callbacks: {
-          onEpochEnd: (epoch, logs) => {
-            const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-            log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${Number(logs.acc ?? logs.accuracy ?? 0).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
-            losses.push(Number(logs.loss));
-            valAcc.push(Number(val));
-            if ((epoch + 1) % 2 === 0 || epoch + 1 === hyper.training.epochs) {
-              drawLossChart(losses, valAcc);
-            }
+          if ((epoch + 1) % 2 === 0 || epoch + 1 === hyper.training.epochs) {
+            drawLossChart(losses, valAcc);
           }
         }
-      });
-    } else {
-      const hyper = readHyperparameters();
-      model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
-      model.build();
-      await model.train(dataset.X_train, dataset.y_train, {
-        epochs: hyper.training.epochs,
-        batchSize: hyper.training.batchSize,
-        validationSplit: hyper.training.validationSplit,
-        onEpochEnd: (epoch, logs) => {
-          const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
-          losses.push(Number(logs.loss));
-          valAcc.push(Number(val));
-          drawLossChart(losses, valAcc);
-        }
-      });
-    }
+      }
+    });
 
     log("Training complete.");
     els.saveBtn.disabled = false;
@@ -853,28 +751,20 @@ async function evaluateModel() {
 async function saveCurrentModel() {
   if (!model) return alert("Train a model before saving.");
   try {
-    if (currentModelType === "CNN") {
-      const key = "tennis_model_cnn";
-      await model.save(`localstorage://${key}`);
-      const meta = {
-        modelType: "CNN",
-        seqLen: loader?.seqLen ?? getSelectedSeqLen(),
-        featureList: loader?.meta?.featureList || dataset?.featureNames || [],
-        featureIndexMap: loader?.meta?.featureIndexMap || {},
-        mean: loader?.meta?.mean || {},
-        std: loader?.meta?.std || {},
-        config: lastCnnConfig?.architecture || DEFAULT_CNN_CONFIG,
-      };
-      localStorage.setItem(`${key}_meta`, JSON.stringify(meta));
-      localStorage.setItem("metadata_cnn.json", JSON.stringify(meta));
-      log("CNN model saved to browser storage.");
-    } else if (currentModelType === "GRU") {
-      await model.save();
-      log("GRU model saved to browser storage.");
-    } else {
-      await model.save();
-      log("MLP model saved to browser storage.");
-    }
+    const key = "tennis_model_cnn";
+    await model.save(`localstorage://${key}`);
+    const meta = {
+      modelType: "CNN",
+      seqLen: loader?.seqLen ?? getSelectedSeqLen(),
+      featureList: loader?.meta?.featureList || dataset?.featureNames || [],
+      featureIndexMap: loader?.meta?.featureIndexMap || {},
+      mean: loader?.meta?.mean || {},
+      std: loader?.meta?.std || {},
+      config: lastCnnConfig?.architecture || DEFAULT_CNN_CONFIG,
+    };
+    localStorage.setItem(`${key}_meta`, JSON.stringify(meta));
+    localStorage.setItem("metadata_cnn.json", JSON.stringify(meta));
+    log("CNN model saved to browser storage.");
   } catch (err) {
     alert(`Save failed: ${err.message}`);
   }
@@ -882,33 +772,22 @@ async function saveCurrentModel() {
 
 async function loadCurrentModel() {
   try {
-    if (currentModelType === "CNN") {
-      const key = "tennis_model_cnn";
-      model = await tf.loadLayersModel(`localstorage://${key}`);
-      const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_cnn.json");
-      if (rawMeta) {
-        try {
-          const meta = JSON.parse(rawMeta);
-          if (loader) {
-            if (meta?.seqLen) loader.seqLen = meta.seqLen;
-            loader.meta = meta || loader.meta;
-          }
-          log(`Restored CNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
-        } catch (err) {
-          console.warn("Failed to parse CNN metadata", err);
+    const key = "tennis_model_cnn";
+    model = await tf.loadLayersModel(`localstorage://${key}`);
+    const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_cnn.json");
+    if (rawMeta) {
+      try {
+        const meta = JSON.parse(rawMeta);
+        if (loader) {
+          if (meta?.seqLen) loader.seqLen = meta.seqLen;
+          loader.meta = meta || loader.meta;
         }
+        log(`Restored CNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
+      } catch (err) {
+        console.warn("Failed to parse CNN metadata", err);
       }
-      log("CNN model loaded from browser storage.");
-    } else if (currentModelType === "GRU") {
-      const m = await GruModel.load();
-      model = m;
-      log("GRU model loaded from browser storage.");
-    } else {
-      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
-      await m.load();
-      model = m;
-      log("MLP model loaded from browser storage.");
     }
+    log("CNN model loaded from browser storage.");
     showPredictPanel(true);
     enableTraining(Boolean(dataset));
     if (!dataset || !loader) {
@@ -960,41 +839,19 @@ async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
   try {
-    if (isSequenceMode()) {
-      const player1 = els.player1Select.value;
-      if (!player1) throw new Error("Select Player 1 to build a sequence.");
-      const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, loader.seqLen);
-      if (!sequence || sequence.length === 0) throw new Error("No history available to build a sequence.");
-      let prob = 0;
-      if (currentModelType === "GRU") {
-        prob = await model.predict(tensor);
-      } else {
-        const pred = model.predict(tensor);
-        const data = await pred.data();
-        prob = data[0];
-        pred.dispose();
-      }
-      const player2 = els.player2Select.value || "Player 2";
-      const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
-      els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
-      renderGruPredictDebug(sequence, featureList, meta);
-      tensor.dispose();
-    } else {
-      if (!currentAutoVector) {
-        alert("Select two players with available matchup data first.");
-        return;
-      }
-      const vec = loader.vectorizeForPredict(currentAutoVector);
-      const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
-      const yProb = model.predictProba(x);
-      const prob = (await yProb.data())[0];
-      const pred = prob >= 0.5 ? 1 : 0;
-      const player1 = currentAutoPayload?.players?.player1 || "Player 1";
-      const player2 = currentAutoPayload?.players?.player2 || "Player 2";
-      const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
-      els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
-      x.dispose(); yProb.dispose();
-    }
+    const player1 = els.player1Select.value;
+    if (!player1) throw new Error("Select Player 1 to build a sequence.");
+    const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, loader.seqLen);
+    if (!sequence || sequence.length === 0) throw new Error("No history available to build a sequence.");
+    const pred = model.predict(tensor);
+    const data = await pred.data();
+    const prob = data[0];
+    pred.dispose();
+    const player2 = els.player2Select.value || "Player 2";
+    const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
+    els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
+    renderGruPredictDebug(sequence, featureList, meta);
+    tensor.dispose();
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
     alert(err.message);
@@ -1018,7 +875,6 @@ els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
 els.gruExampleBtn.addEventListener("click", () => renderGruExample(0));
-els.modelTypeSelect.addEventListener("change", handleModelTypeChange);
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
@@ -1030,42 +886,6 @@ resetGruPredictDebug();
 toggleHyperparamVisibility(currentModelType);
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
-
-function readHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
-  const batchSize = clampInt(els.batchSizeInput?.value, 8, 1024, DEFAULT_HYPERPARAMS.batchSize);
-  const valSplit = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
-  const validationSplit = Number.isFinite(valSplit) ? Math.min(Math.max(valSplit, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
-  const layer1 = clampInt(els.layer1Input?.value, 4, 512, DEFAULT_HYPERPARAMS.hiddenUnits[0]);
-  const layer2 = clampInt(els.layer2Input?.value, 0, 512, DEFAULT_HYPERPARAMS.hiddenUnits[1]);
-  const dropout = Math.min(Math.max(Number.parseFloat(els.dropoutInput?.value ?? DEFAULT_HYPERPARAMS.dropout), 0), 0.9);
-  return {
-    training: {
-      epochs,
-      batchSize,
-      validationSplit,
-    },
-    architecture: {
-      hiddenUnits: [layer1, layer2].filter((n) => Number.isFinite(n) && n > 0),
-      dropout,
-    }
-  };
-}
-
-function readGruHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
-  const rawBatch = Number.parseInt(els.gruBatchInput?.value ?? DEFAULT_GRU_CONFIG.batchSize, 10);
-  const clampedBatch = clampInt(rawBatch, 16, 64, DEFAULT_GRU_CONFIG.batchSize);
-  const units = clampInt(els.gruUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.units);
-  const denseUnits = clampInt(els.gruDenseUnitsInput?.value, 4, 512, DEFAULT_GRU_CONFIG.denseUnits);
-  const dropout = Math.min(Math.max(Number.parseFloat(els.gruDropoutInput?.value ?? DEFAULT_GRU_CONFIG.dropout), 0), 0.9);
-  const lr = Number.parseFloat(els.gruLrInput?.value ?? DEFAULT_GRU_CONFIG.lr);
-  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_GRU_CONFIG.lr;
-  return {
-    training: { epochs, batchSize: clampedBatch, rawBatch },
-    architecture: { units, denseUnits, dropout, lr: learningRate },
-  };
-}
 
 function readCnnHyperparameters() {
   const epochs = clampInt(els.epochsInput.value, 1, 200, 6);

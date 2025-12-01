@@ -80,6 +80,15 @@ header .subtitle {
   margin-bottom: 12px;
 }
 
+.model-pill {
+  background: linear-gradient(120deg, #1f2a45, #223150);
+  color: #e8f0ff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #304366;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
 .model-row label {
   display: flex;
   flex-direction: column;
