@@ -17,18 +17,18 @@
 <body>
   <header>
     <h1>WTA Match Outcome — In-Browser Neural Network (TensorFlow.js)</h1>
-    <p class="subtitle">Train, evaluate, and debug CNN-ready sequences without leaving the browser.</p>
+    <p class="subtitle">Train, evaluate, and debug RNN-ready sequences without leaving the browser.</p>
   </header>
 
   <div class="container">
     <div class="card">
       <h3 style="margin-top:0;">Dataset & Training Controls</h3>
       <div class="row model-row">
-        <div class="model-pill">Model: <strong>CNN (1D sequences)</strong></div>
-        <label class="cnn-only">Sequence Length
+        <div class="model-pill">Model: <strong>RNN (temporal sequences)</strong></div>
+        <label class="rnn-only">Sequence Length
           <input type="number" id="gruSeqLen" min="1" max="60" value="15" />
         </label>
-        <div class="small muted">Sequence windows are normalized and fed into the 1D CNN for rapid training.</div>
+        <div class="small muted">Sequence windows are normalized and fed into the RNN for rapid training.</div>
       </div>
       <div class="row btn-row">
         <button id="trainBtn" disabled>Train Model</button>
@@ -44,13 +44,13 @@
       <div class="hyper-grid">
         <label>Epochs<input type="number" id="epochsInput" value="6" min="1" max="200" /></label>
         <label>Validation split<input type="number" id="valSplitInput" value="0.2" min="0.05" max="0.5" step="0.05" /></label>
-        <label class="cnn-only">CNN filters<input type="number" id="cnnFilters" value="32" min="4" max="256" /></label>
-        <label class="cnn-only">CNN kernel size<input type="number" id="cnnKernel" value="3" min="2" max="9" /></label>
-        <label class="cnn-only">CNN dense units<input type="number" id="cnnDenseUnits" value="32" min="4" max="256" /></label>
-        <label class="cnn-only">CNN learning rate<input type="number" id="cnnLr" value="0.001" min="0.0001" max="0.01" step="0.0001" /></label>
-        <label class="cnn-only">CNN batch size<input type="number" id="cnnBatch" value="32" min="8" max="512" step="4" /></label>
+        <label class="rnn-only">RNN units<input type="number" id="rnnUnits" value="64" min="4" max="256" /></label>
+        <label class="rnn-only">RNN dense units<input type="number" id="rnnDenseUnits" value="32" min="4" max="256" /></label>
+        <label class="rnn-only">RNN dropout<input type="number" id="rnnDropout" value="0.2" min="0" max="0.8" step="0.05" /></label>
+        <label class="rnn-only">RNN learning rate<input type="number" id="rnnLr" value="0.001" min="0.0001" max="0.01" step="0.0001" /></label>
+        <label class="rnn-only">RNN batch size<input type="number" id="rnnBatch" value="32" min="8" max="512" step="4" /></label>
       </div>
-      <div class="small muted" style="margin-top:6px;">Tune CNN hyperparameters here; defaults are prefilled for quick runs.</div>
+      <div class="small muted" style="margin-top:6px;">Tune RNN hyperparameters here; defaults are prefilled for quick runs.</div>
       <div class="metrics" id="info" style="margin-top:8px;">Loading dataset...</div>
     </div>
 
@@ -73,7 +73,7 @@
     </div>
 
     <div class="card" id="gruDebugCard">
-      <h3 style="margin-top:0;">Sequence Debug Info (CNN)</h3>
+      <h3 style="margin-top:0;">Sequence Debug Info (RNN)</h3>
       <div class="gru-debug-layout">
         <pre id="gruSummary">Sequence inputs not prepared yet.</pre>
         <div class="gru-right">
@@ -119,7 +119,7 @@
       <button id="predictBtn" type="button">Predict</button>
       <div id="predictOut" style="margin-top:10px; font-weight:600;"></div>
       <div id="gruPredictDebug" class="gru-predict-debug">
-          <pre id="gruPredictSummary">Sequence prediction debug will appear here in CNN mode.</pre>
+          <pre id="gruPredictSummary">Sequence prediction debug will appear here in RNN mode.</pre>
         <div class="table-wrapper"><table id="gruPredictTable" class="sequence-table"></table></div>
       </div>
     </div>

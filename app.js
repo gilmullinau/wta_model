@@ -3,24 +3,24 @@
 
 import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
 import { buildSequences } from "./sequence-builder.js";
-import { buildCNNModel } from "./models/cnn1d-model.js";
+import { buildRNNModel } from "./models/rnn-model.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const GRU_SEQ_LEN = 15;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
-const SEQUENCE_MODES = new Set(["CNN"]);
+const SEQUENCE_MODES = new Set(["RNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
   hiddenUnits: [128, 64],
   dropout: 0.3,
 };
-const DEFAULT_CNN_CONFIG = {
-  filters: 32,
-  kernelSize: 3,
+const DEFAULT_RNN_CONFIG = {
+  units: 64,
   denseUnits: 32,
+  dropout: 0.2,
   learningRate: 0.001,
   batchSize: 32,
 };
@@ -33,9 +33,9 @@ let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
 let gruSequences = null;
-let currentModelType = "CNN";
+let currentModelType = "RNN";
 let lastCSVText = null;
-let lastCnnConfig = null;
+let lastRnnConfig = null;
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -62,11 +62,11 @@ const els = {
   gruExampleMeta: document.getElementById("gruExampleMeta"),
   gruTensorShapes: document.getElementById("gruTensorShapes"),
   gruError: document.getElementById("gruError"),
-  cnnFiltersInput: document.getElementById("cnnFilters"),
-  cnnKernelInput: document.getElementById("cnnKernel"),
-  cnnDenseUnitsInput: document.getElementById("cnnDenseUnits"),
-  cnnLrInput: document.getElementById("cnnLr"),
-  cnnBatchInput: document.getElementById("cnnBatch"),
+  rnnUnitsInput: document.getElementById("rnnUnits"),
+  rnnDenseUnitsInput: document.getElementById("rnnDenseUnits"),
+  rnnDropoutInput: document.getElementById("rnnDropout"),
+  rnnLrInput: document.getElementById("rnnLr"),
+  rnnBatchInput: document.getElementById("rnnBatch"),
   gruPredictSummary: document.getElementById("gruPredictSummary"),
   gruPredictTable: document.getElementById("gruPredictTable"),
   fileInput: document.getElementById("fileInput"),
@@ -95,21 +95,21 @@ function log(msg) {
 }
 
 function getSelectedModelType() {
-  return "CNN";
+  return "RNN";
 }
 
 function setModeClass(mode) {
-  document.body.classList.remove("mode-mlp", "mode-gru", "mode-cnn");
+  document.body.classList.remove("mode-mlp", "mode-gru", "mode-rnn");
   if (mode === "GRU") document.body.classList.add("mode-gru");
-  else if (mode === "CNN") document.body.classList.add("mode-cnn");
+  else if (mode === "RNN") document.body.classList.add("mode-rnn");
   else document.body.classList.add("mode-mlp");
 }
 
 function toggleHyperparamVisibility(mode) {
   setModeClass(mode);
-  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = mode !== "CNN";
-  [els.cnnFiltersInput, els.cnnKernelInput, els.cnnDenseUnitsInput, els.cnnLrInput, els.cnnBatchInput].forEach((el) => {
-    if (el) el.disabled = mode !== "CNN";
+  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = mode !== "RNN";
+  [els.rnnUnitsInput, els.rnnDenseUnitsInput, els.rnnDropoutInput, els.rnnLrInput, els.rnnBatchInput].forEach((el) => {
+    if (el) el.disabled = mode !== "RNN";
   });
 }
 
@@ -138,7 +138,7 @@ function resetGruDebug(message = "Sequence inputs not prepared yet.") {
   els.gruExampleBtn.disabled = true;
 }
 
-function resetGruPredictDebug(message = "Sequence prediction debug will appear here in CNN mode.") {
+function resetGruPredictDebug(message = "Sequence prediction debug will appear here in RNN mode.") {
   if (els.gruPredictSummary) els.gruPredictSummary.textContent = message;
   if (els.gruPredictTable) els.gruPredictTable.innerHTML = "";
 }
@@ -236,7 +236,7 @@ async function parseAndInit(text) {
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     resetGruDebug();
     resetGruPredictDebug();
-    currentModelType = "CNN";
+    currentModelType = "RNN";
     toggleHyperparamVisibility(currentModelType);
     const seqLen = getSelectedSeqLen();
     loader = new DataLoader(currentModelType, seqLen);
@@ -301,7 +301,7 @@ function prepareGruSequences() {
     loader.seqLen = seqLen;
     const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
-    const expectedCount = Math.max(20, featureList.length);
+    const expectedCount = featureList.length;
     renderGruSummary(result, expectedCount, currentModelType);
     return true;
   } catch (err) {
@@ -667,22 +667,22 @@ async function trainModel() {
   const losses = [], valAcc = [];
   enableTraining(false);
   try {
-    const hyper = readCnnHyperparameters();
-    lastCnnConfig = hyper;
+    const hyper = readRnnHyperparameters();
+    lastRnnConfig = hyper;
     const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
     const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
-    console.log("CNN tensor check:", tensorsAreValid, testTensorsValid);
+    console.log("RNN tensor check:", tensorsAreValid, testTensorsValid);
     console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
-    log(`CNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
+    log(`RNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
     if (!tensorsAreValid || !testTensorsValid) {
-      log("CNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
-      throw new Error("Invalid CNN input tensors");
+      log("RNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
+      throw new Error("Invalid RNN input tensors");
     }
     const seqLen = loader.seqLen;
-    model = buildCNNModel([seqLen, dataset.featureNames.length], {
-      filters: hyper.architecture.filters,
-      kernelSize: hyper.architecture.kernelSize,
+    model = buildRNNModel([seqLen, dataset.featureNames.length], {
+      units: hyper.architecture.units,
       denseUnits: hyper.architecture.denseUnits,
+      dropout: hyper.architecture.dropout,
       learningRate: hyper.architecture.learningRate,
     });
     await model.fit(dataset.X_train, dataset.y_train, {
@@ -734,41 +734,34 @@ async function confusionMatrixFromModel(modelInstance, X, y) {
 async function evaluateModel() {
   if (!dataset || !model) return alert("Train the model first.");
   log("Evaluating on test set...");
-  if (currentModelType === "CNN") {
-    const evalOut = await model.evaluate(dataset.X_test, dataset.y_test, { batchSize: 256 });
-    const [lossTensor, accTensor] = Array.isArray(evalOut) ? evalOut : [evalOut];
-    const loss = (await lossTensor.data())[0];
-    const acc = accTensor ? (await accTensor.data())[0] : 0;
-    lossTensor.dispose();
-    accTensor?.dispose();
-    log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
-    const cm = await confusionMatrixFromModel(model, dataset.X_test, dataset.y_test);
-    drawConfusionMatrix(cm);
-    return;
-  }
-  const { loss, acc } = await model.evaluate(dataset.X_test, dataset.y_test);
+  const evalOut = await model.evaluate(dataset.X_test, dataset.y_test, { batchSize: 256 });
+  const [lossTensor, accTensor] = Array.isArray(evalOut) ? evalOut : [evalOut];
+  const loss = (await lossTensor.data())[0];
+  const acc = accTensor ? (await accTensor.data())[0] : 0;
+  lossTensor.dispose();
+  accTensor?.dispose();
   log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
-  const cm = await model.confusionMatrix(dataset.X_test, dataset.y_test);
+  const cm = await confusionMatrixFromModel(model, dataset.X_test, dataset.y_test);
   drawConfusionMatrix(cm);
 }
 
 async function saveCurrentModel() {
   if (!model) return alert("Train a model before saving.");
   try {
-    const key = "tennis_model_cnn";
+    const key = "tennis_model_rnn";
     await model.save(`localstorage://${key}`);
     const meta = {
-      modelType: "CNN",
+      modelType: "RNN",
       seqLen: loader?.seqLen ?? getSelectedSeqLen(),
       featureList: loader?.meta?.featureList || dataset?.featureNames || [],
       featureIndexMap: loader?.meta?.featureIndexMap || {},
       mean: loader?.meta?.mean || {},
       std: loader?.meta?.std || {},
-      config: lastCnnConfig?.architecture || DEFAULT_CNN_CONFIG,
+      config: lastRnnConfig?.architecture || DEFAULT_RNN_CONFIG,
     };
     localStorage.setItem(`${key}_meta`, JSON.stringify(meta));
-    localStorage.setItem("metadata_cnn.json", JSON.stringify(meta));
-    log("CNN model saved to browser storage.");
+    localStorage.setItem("metadata_rnn.json", JSON.stringify(meta));
+    log("RNN model saved to browser storage.");
   } catch (err) {
     alert(`Save failed: ${err.message}`);
   }
@@ -776,9 +769,9 @@ async function saveCurrentModel() {
 
 async function loadCurrentModel() {
   try {
-    const key = "tennis_model_cnn";
+    const key = "tennis_model_rnn";
     model = await tf.loadLayersModel(`localstorage://${key}`);
-    const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_cnn.json");
+    const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_rnn.json");
     if (rawMeta) {
       try {
         const meta = JSON.parse(rawMeta);
@@ -786,12 +779,12 @@ async function loadCurrentModel() {
           if (meta?.seqLen) loader.seqLen = meta.seqLen;
           loader.meta = meta || loader.meta;
         }
-        log(`Restored CNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
+        log(`Restored RNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
       } catch (err) {
-        console.warn("Failed to parse CNN metadata", err);
+        console.warn("Failed to parse RNN metadata", err);
       }
     }
-    log("CNN model loaded from browser storage.");
+    log("RNN model loaded from browser storage.");
     showPredictPanel(true);
     enableTraining(Boolean(dataset));
     if (!dataset || !loader) {
@@ -891,23 +884,24 @@ toggleHyperparamVisibility(currentModelType);
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
-function readCnnHyperparameters() {
+function readRnnHyperparameters() {
   const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
-  const rawBatch = Number.parseInt(els.cnnBatchInput?.value ?? DEFAULT_CNN_CONFIG.batchSize, 10);
-  const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_CNN_CONFIG.batchSize);
-  const filters = clampInt(els.cnnFiltersInput?.value, 4, 256, DEFAULT_CNN_CONFIG.filters);
-  const kernelSize = clampInt(els.cnnKernelInput?.value, 2, 9, DEFAULT_CNN_CONFIG.kernelSize);
-  const denseUnits = clampInt(els.cnnDenseUnitsInput?.value, 4, 256, DEFAULT_CNN_CONFIG.denseUnits);
-  const lr = Number.parseFloat(els.cnnLrInput?.value ?? DEFAULT_CNN_CONFIG.learningRate);
-  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_CNN_CONFIG.learningRate;
+  const rawBatch = Number.parseInt(els.rnnBatchInput?.value ?? DEFAULT_RNN_CONFIG.batchSize, 10);
+  const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_RNN_CONFIG.batchSize);
+  const units = clampInt(els.rnnUnitsInput?.value, 8, 256, DEFAULT_RNN_CONFIG.units);
+  const denseUnits = clampInt(els.rnnDenseUnitsInput?.value, 4, 256, DEFAULT_RNN_CONFIG.denseUnits);
+  const rawDropout = Number.parseFloat(els.rnnDropoutInput?.value ?? DEFAULT_RNN_CONFIG.dropout);
+  const dropout = Number.isFinite(rawDropout) ? Math.min(Math.max(rawDropout, 0), 0.8) : DEFAULT_RNN_CONFIG.dropout;
+  const lr = Number.parseFloat(els.rnnLrInput?.value ?? DEFAULT_RNN_CONFIG.learningRate);
+  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_RNN_CONFIG.learningRate;
   const valSplitRaw = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
   const validationSplit = Number.isFinite(valSplitRaw) ? Math.min(Math.max(valSplitRaw, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
-  if (filters > 64 || denseUnits > 64 || batchSize > 64 || kernelSize < 2 || kernelSize > 5) {
-    throw new Error("Too heavy configuration — running in browser. Reduce filters or batch size.");
+  if (units > 128 || denseUnits > 128 || batchSize > 64) {
+    throw new Error("Too heavy configuration — running in browser. Reduce units or batch size.");
   }
   return {
     training: { epochs, batchSize, rawBatch },
-    architecture: { filters, kernelSize, denseUnits, learningRate },
+    architecture: { units, denseUnits, dropout, learningRate },
     validationSplit,
   };
 }

@@ -69,7 +69,7 @@ export class DataLoader {
   }
 
   isSequenceMode() {
-    return this.modelType === "GRU" || this.modelType === "CNN";
+    return this.modelType === "GRU" || this.modelType === "RNN";
   }
 
   async loadCSVText(csvText) {
@@ -294,7 +294,7 @@ export class DataLoader {
 
   buildSequenceInputForMatch(player, seqLen = this.seqLen) {
     if (!this.isSequenceMode()) {
-      throw new Error("Sequence mode (GRU/CNN) is required to build inputs.");
+      throw new Error("Sequence mode (GRU/RNN) is required to build inputs.");
     }
     if (!player) throw new Error("Player name is required for sequence prediction.");
     const featureList = (this.meta.featureList && this.meta.featureList.length)
