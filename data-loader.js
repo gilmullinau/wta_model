@@ -29,7 +29,7 @@ export const GRU_SEQUENCE_FEATURES = [
 ];
 
 export class DataLoader {
-  constructor(modelType = "MLP", seqLen = 15) {
+  constructor(modelType = "MLP", seqLen = 10) {
     this.modelType = modelType;
     this.seqLen = seqLen;
     this.featureListMLP = [

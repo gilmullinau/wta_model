@@ -8,7 +8,7 @@ import { buildRNNModel } from "./models/rnn-model.js";
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
-const GRU_SEQ_LEN = 15;
+const GRU_SEQ_LEN = 10;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
 const SEQUENCE_MODES = new Set(["RNN"]);
 const DEFAULT_HYPERPARAMS = {
@@ -18,12 +18,29 @@ const DEFAULT_HYPERPARAMS = {
   dropout: 0.3,
 };
 const DEFAULT_RNN_CONFIG = {
-  units: 64,
+  units: 16,
   denseUnits: 32,
-  dropout: 0.2,
+  dropout: 0,
   learningRate: 0.001,
-  batchSize: 32,
+  batchSize: 8,
 };
+
+async function ensureWebGLBackend() {
+  try {
+    await tf.ready();
+    const current = tf.getBackend();
+    if (current !== "webgl") {
+      await tf.setBackend("webgl");
+      await tf.ready();
+      log(`Backend switched to ${tf.getBackend()} for accelerated GRU training.`);
+    } else {
+      console.log("WebGL backend already active");
+    }
+  } catch (err) {
+    console.warn("Failed to switch backend", err);
+    log(`Warning: could not switch backend — ${err.message}`);
+  }
+}
 
 let loader = null;
 let model = null;
@@ -238,6 +255,7 @@ function showPredictPanel(show) {
 
 async function parseAndInit(text) {
   try {
+    await ensureWebGLBackend();
     disposeDataset();
     if (model) {
       model.dispose();
@@ -658,6 +676,7 @@ async function trainModel() {
   }
   try {
     await tf.ready();
+    await ensureWebGLBackend();
     if (typeof tf.getBackend === "function") {
       console.log("TensorFlow backend:", tf.getBackend());
     }
@@ -899,15 +918,15 @@ function readRnnHyperparameters() {
   const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
   const rawBatch = Number.parseInt(els.rnnBatchInput?.value ?? DEFAULT_RNN_CONFIG.batchSize, 10);
   const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_RNN_CONFIG.batchSize);
-  const units = clampInt(els.rnnUnitsInput?.value, 8, 256, DEFAULT_RNN_CONFIG.units);
-  const denseUnits = clampInt(els.rnnDenseUnitsInput?.value, 4, 256, DEFAULT_RNN_CONFIG.denseUnits);
+  const units = clampInt(els.rnnUnitsInput?.value, 4, 64, DEFAULT_RNN_CONFIG.units);
+  const denseUnits = clampInt(els.rnnDenseUnitsInput?.value, 4, 128, DEFAULT_RNN_CONFIG.denseUnits);
   const rawDropout = Number.parseFloat(els.rnnDropoutInput?.value ?? DEFAULT_RNN_CONFIG.dropout);
   const dropout = Number.isFinite(rawDropout) ? Math.min(Math.max(rawDropout, 0), 0.8) : DEFAULT_RNN_CONFIG.dropout;
   const lr = Number.parseFloat(els.rnnLrInput?.value ?? DEFAULT_RNN_CONFIG.learningRate);
   const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_RNN_CONFIG.learningRate;
   const valSplitRaw = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
   const validationSplit = Number.isFinite(valSplitRaw) ? Math.min(Math.max(valSplitRaw, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
-  if (units > 128 || denseUnits > 128 || batchSize > 64) {
+  if (units > 64 || denseUnits > 128 || batchSize > 64) {
     throw new Error("Too heavy configuration — running in browser. Reduce units or batch size.");
   }
   return {

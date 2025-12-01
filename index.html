@@ -26,7 +26,7 @@
       <div class="row model-row">
         <div class="model-pill">Model: <strong>RNN (temporal sequences)</strong></div>
         <label class="rnn-only">Sequence Length
-          <input type="number" id="gruSeqLen" min="1" max="60" value="15" />
+          <input type="number" id="gruSeqLen" min="1" max="60" value="10" />
         </label>
         <div class="small muted">Sequence windows are normalized and fed into the RNN for rapid training.</div>
       </div>
@@ -44,11 +44,11 @@
       <div class="hyper-grid">
         <label>Epochs<input type="number" id="epochsInput" value="6" min="1" max="200" /></label>
         <label>Validation split<input type="number" id="valSplitInput" value="0.2" min="0.05" max="0.5" step="0.05" /></label>
-        <label class="rnn-only">RNN units<input type="number" id="rnnUnits" value="64" min="4" max="256" /></label>
-        <label class="rnn-only">RNN dense units<input type="number" id="rnnDenseUnits" value="32" min="4" max="256" /></label>
-        <label class="rnn-only">RNN dropout<input type="number" id="rnnDropout" value="0.2" min="0" max="0.8" step="0.05" /></label>
+        <label class="rnn-only">RNN units<input type="number" id="rnnUnits" value="16" min="4" max="128" /></label>
+        <label class="rnn-only">RNN dense units<input type="number" id="rnnDenseUnits" value="32" min="4" max="128" /></label>
+        <label class="rnn-only">RNN dropout<input type="number" id="rnnDropout" value="0" min="0" max="0.8" step="0.05" /></label>
         <label class="rnn-only">RNN learning rate<input type="number" id="rnnLr" value="0.001" min="0.0001" max="0.01" step="0.0001" /></label>
-        <label class="rnn-only">RNN batch size<input type="number" id="rnnBatch" value="32" min="8" max="512" step="4" /></label>
+        <label class="rnn-only">RNN batch size<input type="number" id="rnnBatch" value="8" min="4" max="128" step="4" /></label>
       </div>
       <div class="small muted" style="margin-top:6px;">Tune RNN hyperparameters here; defaults are prefilled for quick runs.</div>
       <div class="metrics" id="info" style="margin-top:8px;">Loading dataset...</div>
