@@ -172,10 +172,19 @@ function renderGruSummary(result, expectedFeatureCount = null, mode = currentMod
 
 function renderGruExample(index = null) {
   if (!gruSequences || !gruSequences.X || gruSequences.X.length === 0) return;
-  const idx = index === null ? gruSequences.X.length - 1 : index;
-  const boundedIdx = Math.max(0, Math.min(idx, gruSequences.X.length - 1));
+  let resolvedIdx = index;
+  if (resolvedIdx === null) {
+    const sampleInfo = gruSequences.meta.sampleInfo || [];
+    const sabalenkaIdx = sampleInfo
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => (s?.player || "").toLowerCase().includes("sabalenka"))
+      .map(({ i }) => i)
+      .pop();
+    resolvedIdx = sabalenkaIdx !== undefined ? sabalenkaIdx : gruSequences.X.length - 1;
+  }
+  const boundedIdx = Math.max(0, Math.min(resolvedIdx, gruSequences.X.length - 1));
   const seq = gruSequences.X[boundedIdx];
-  const info = gruSequences.meta.sampleInfo[boundedIdx] || {};
+  const info = (gruSequences.meta.sampleInfo || [])[boundedIdx] || {};
   const headers = ["Timestep", ...(gruSequences.meta.featureList || GRU_FEATURES)];
   const reversedSeq = [...seq].reverse();
   const rows = reversedSeq.map((values, i) => {
