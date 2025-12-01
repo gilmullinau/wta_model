@@ -175,8 +175,10 @@ function renderGruExample(index = 0) {
   const seq = gruSequences.X[index];
   const info = gruSequences.meta.sampleInfo[index] || {};
   const headers = ["Timestep", ...(gruSequences.meta.featureList || GRU_FEATURES)];
-  const rows = seq.map((values, i) => {
-    const cells = [`<td>${i + 1}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+  const reversedSeq = [...seq].reverse();
+  const rows = reversedSeq.map((values, i) => {
+    const timestep = seq.length - i;
+    const cells = [`<td>${timestep}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
     return `<tr>${cells.join("")}</tr>`;
   });
   const headerCells = headers.map((h) => `<th>${h}</th>`);
@@ -197,8 +199,10 @@ function renderGruPredictDebug(sequence, featureList, meta) {
   ];
   els.gruPredictSummary.textContent = lines.join("\n");
   const headers = ["Timestep", ...featureList];
-  const rows = sequence.map((values, i) => {
-    const cells = [`<td>${i + 1}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+  const reversedSeq = [...sequence].reverse();
+  const rows = reversedSeq.map((values, i) => {
+    const timestep = sequence.length - i;
+    const cells = [`<td>${timestep}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
     return `<tr>${cells.join("")}</tr>`;
   });
   const headerCells = headers.map((h) => `<th>${h}</th>`).join("");
