@@ -2,14 +2,13 @@
 // Loads TensorFlow.js (global tf), dataset from wta_data.csv, trains MLP model, visualizes metrics.
 
 import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
-import { buildSequences } from "./sequence-builder.js";
 import { buildRNNModel } from "./models/rnn-model.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const GRU_SEQ_LEN = 10;
-const GRU_FEATURES = GRU_SEQUENCE_FEATURES.slice();
+const GRU_FEATURES = GRU_SEQUENCE_FEATURES.flatMap((f) => [`p1_${f}`, `p2_${f}`]);
 const SEQUENCE_MODES = new Set(["RNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
@@ -221,9 +220,10 @@ function renderGruExample(index = null) {
   });
   const headerCells = headers.map((h) => `<th>${h}</th>`);
   els.gruExampleTable.innerHTML = `<thead><tr>${headerCells.join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
-  const player = info.player || "Unknown";
   const date = info.date || "n/a";
-  els.gruExampleMeta.textContent = `Target y = ${info.label ?? "?"} | Match date = ${date} | Player = ${player}`;
+  const p1 = info.player1 || info.player || "Unknown";
+  const p2 = info.player2 || "Unknown";
+  els.gruExampleMeta.textContent = `Target y = ${info.label ?? "?"} | Match date = ${date} | Players: ${p1} vs ${p2}`;
 }
 
 function renderGruPredictDebug(sequence, featureList, meta) {
@@ -231,7 +231,7 @@ function renderGruPredictDebug(sequence, featureList, meta) {
   const lines = [
     "SEQUENCE PREDICTION DEBUG",
     `Input shape: [1, ${loader.seqLen}, ${featureList.length}]`,
-    `Player: ${meta.player || "n/a"}`,
+    `Players: ${meta.player1 || "n/a"} vs ${meta.player2 || "n/a"}`,
     `Latest date: ${meta.latestDate || "n/a"}`,
     `Padding: ${meta.padded ? "YES" : "NO"} | Matches used: ${meta.usedRows}`,
   ];
@@ -364,17 +364,13 @@ function prepareGruSequences() {
     return false;
   }
   try {
-    const rows = loader.getSequenceRows();
-    const featureList = loader.getSequenceFeatureList();
-    if (!rows || rows.length === 0) {
+    const result = loader.getSequenceDebug();
+    if (!result || !result.X || result.X.length === 0) {
       resetGruDebug("No rows available for sequence builder.");
       return false;
     }
-    const seqLen = getSelectedSeqLen();
-    loader.seqLen = seqLen;
-    const result = buildSequences(rows, seqLen, featureList);
     gruSequences = result;
-    const expectedCount = featureList.length;
+    const expectedCount = result.meta ? result.meta.numFeatures : null;
     renderGruSummary(result, expectedCount, currentModelType);
     return true;
   } catch (err) {
@@ -828,6 +824,7 @@ async function saveCurrentModel() {
       modelType: "RNN",
       seqLen: loader?.seqLen ?? getSelectedSeqLen(),
       featureList: loader?.meta?.featureList || dataset?.featureNames || [],
+      baseFeatureList: loader?.meta?.baseFeatureList || [],
       featureIndexMap: loader?.meta?.featureIndexMap || {},
       mean: loader?.meta?.mean || {},
       std: loader?.meta?.std || {},
@@ -845,19 +842,24 @@ async function loadCurrentModel() {
   try {
     const key = "tennis_model_rnn";
     model = await tf.loadLayersModel(`localstorage://${key}`);
-    const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_rnn.json");
-    if (rawMeta) {
-      try {
-        const meta = JSON.parse(rawMeta);
-        if (loader) {
-          if (meta?.seqLen) loader.seqLen = meta.seqLen;
-          loader.meta = meta || loader.meta;
+      const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_rnn.json");
+      if (rawMeta) {
+        try {
+          const meta = JSON.parse(rawMeta);
+          if (loader) {
+            if (meta?.seqLen) loader.seqLen = meta.seqLen;
+            loader.meta = meta || loader.meta;
+            if (!loader.meta.baseFeatureList && Array.isArray(meta?.featureList)) {
+              loader.meta.baseFeatureList = (meta.baseFeatureList && meta.baseFeatureList.length)
+                ? meta.baseFeatureList
+                : meta.featureList.slice(0, meta.featureList.length / 2).map((f) => f.replace(/^p[12]_/, ""));
+            }
+          }
+          log(`Restored RNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
+        } catch (err) {
+          console.warn("Failed to parse RNN metadata", err);
         }
-        log(`Restored RNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
-      } catch (err) {
-        console.warn("Failed to parse RNN metadata", err);
       }
-    }
     log("RNN model loaded from browser storage.");
     showPredictPanel(true);
     enableTraining(Boolean(dataset));
@@ -911,15 +913,15 @@ async function handlePredict(e) {
   if (!model || !loader) return alert("Train or load a model first.");
   try {
     const player1 = els.player1Select.value;
-    if (!player1) throw new Error("Select Player 1 to build a sequence.");
-    const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, loader.seqLen);
+    const player2 = els.player2Select.value;
+    if (!player1 || !player2) throw new Error("Select both Player 1 and Player 2 to build a sequence.");
+    const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, player2, loader.seqLen);
     if (!sequence || sequence.length === 0) throw new Error("No history available to build a sequence.");
     const pred = model.predict(tensor);
     const data = await pred.data();
     const prob = data[0];
     pred.dispose();
-    const player2 = els.player2Select.value || "Player 2";
-    const outcome = prob >= 0.5 ? `${player1} is favored` : `${player1} is an underdog`;
+    const outcome = prob >= 0.5 ? `${player1} is favored` : `${player2} is favored`;
     els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
     renderGruPredictDebug(sequence, featureList, meta);
     tensor.dispose();
