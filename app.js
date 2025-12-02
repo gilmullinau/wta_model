@@ -21,7 +21,7 @@ const DEFAULT_RNN_CONFIG = {
   denseUnits: 32,
   dropout: 0,
   learningRate: 0.001,
-  batchSize: 8,
+  batchSize: 32,
 };
 
 async function ensureWebGLBackend() {
