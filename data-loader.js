@@ -14,6 +14,7 @@ export const GRU_SEQUENCE_FEATURES = [
   "h2h_advantage",
   "last_winner",
   "surface_winrate_adv",
+  "year",
 
   // Dynamic form / fatigue
   "recent_win_rate_5",
@@ -25,7 +26,25 @@ export const GRU_SEQUENCE_FEATURES = [
 
   // Surface momentum
   "surface_trend",
-  "year",
+];
+
+const REQUIRED_SEQUENCE_COLUMNS = [
+  "y",
+  "match_date",
+  "Date",
+  "Player_1",
+  "Player_2",
+  "Rank_1",
+  "Rank_2",
+  "Pts_1",
+  "Pts_2",
+  "Odd_1",
+  "Odd_2",
+  "Tournament",
+  ...GRU_SEQUENCE_FEATURES,
+  "Surface",
+  "Court",
+  "Round",
 ];
 
 export class DataLoader {
@@ -100,6 +119,13 @@ export class DataLoader {
       if (missingNumeric.length > 0) missing.push(`numeric: ${missingNumeric.join(", ")}`);
       if (missingCategorical.length > 0) missing.push(`categorical: ${missingCategorical.join(", ")}`);
       throw new Error(`Missing expected columns — ${missing.join("; ")}`);
+    }
+
+    if (this.isSequenceMode()) {
+      const missingReq = REQUIRED_SEQUENCE_COLUMNS.filter((c) => !headers.includes(c));
+      if (missingReq.length > 0) {
+        throw new Error(`Missing required CSV columns for sequences: ${missingReq.join(", ")}`);
+      }
     }
 
     this.sequenceFeatureCols = this._buildSequenceFeatureList(headers);
