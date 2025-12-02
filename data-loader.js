@@ -21,9 +21,6 @@ export const GRU_SEQUENCE_FEATURES = [
   "fatigue_7d",
   "fatigue_14d",
   "fatigue_30d",
-  "surface_win_rate_hard_5",
-  "surface_win_rate_clay_5",
-  "surface_win_rate_grass_5",
   "surface_trend",
   "year",
 ];
@@ -42,7 +39,8 @@ export class DataLoader {
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
       "Tournament", "Date", "Best of", "Best_of", "Player_1", "Player_2", "Winner", "Score",
-      "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2"
+      "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2",
+      "surface_win_rate_hard_5", "surface_win_rate_clay_5", "surface_win_rate_grass_5",
     ];
     this.labelCol = "y";
     this.catLevels = {};
@@ -143,6 +141,8 @@ export class DataLoader {
         if (c in row) delete row[c];
       }
     });
+
+    this._recomputeSurfaceTrend(raw, metaRows);
 
     const filtered = [];
     const filteredMeta = [];
@@ -382,6 +382,45 @@ export class DataLoader {
         usedRows: recent.length,
       }
     };
+  }
+
+  _recomputeSurfaceTrend(rows, metaRows) {
+    const history = new Map();
+    const zipped = rows.map((row, idx) => ({
+      row,
+      meta: metaRows[idx],
+      timestamp: Number.isFinite(metaRows[idx]?.timestamp) ? metaRows[idx].timestamp : -Infinity,
+    }));
+
+    zipped.sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const { row, meta } of zipped) {
+      const player = (meta?.player1 || meta?.player || row.player || "").toString().trim();
+      const surface = (meta?.surface || row.Surface || row.surface || "").toString().trim();
+      if (!player) {
+        row.surface_trend = 0;
+        if (meta?.numeric) meta.numeric.surface_trend = 0;
+        continue;
+      }
+
+      const key = `${player}|||${surface}`;
+      const past = history.get(key) || [];
+
+      const short = past.slice(-5);
+      const long = past.slice(-15);
+      const shortWr = short.length ? short.reduce((a, b) => a + b, 0) / short.length : 0;
+      const longWr = long.length ? long.reduce((a, b) => a + b, 0) / long.length : 0;
+      const trend = Math.max(-1, Math.min(1, shortWr - longWr));
+
+      const cleanTrend = Number.isFinite(trend) ? trend : 0;
+      row.surface_trend = cleanTrend;
+      if (meta?.numeric) meta.numeric.surface_trend = cleanTrend;
+
+      const isWinRaw = this._toNumber(row[this.labelCol]);
+      const isWin = Number.isFinite(isWinRaw) && isWinRaw >= 0.5 ? 1 : 0;
+      const updated = past.concat(isWin);
+      history.set(key, updated.length > 15 ? updated.slice(-15) : updated);
+    }
   }
 
   getPlayerSnapshot(player) {
