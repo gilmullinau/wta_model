@@ -467,7 +467,7 @@ function buildCategoryControls() {
     ];
     el.innerHTML = optionHtml.join("");
     el.value = "";
-    el.disabled = true;
+    el.disabled = false;
   });
 }
 
@@ -475,7 +475,7 @@ function resetCategoryControls() {
   CATEGORY_FIELDS.forEach(({ el }) => {
     if (!el) return;
     el.value = "";
-    el.disabled = true;
+    el.disabled = !loader;
   });
 }
 
