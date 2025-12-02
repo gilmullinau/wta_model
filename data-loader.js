@@ -6,7 +6,7 @@ import { buildSequences } from "./sequence-builder.js";
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
 
-export const GRU_SEQUENCE_FEATURES = [
+const BASE_GRU_SEQUENCE_FEATURES = [
   // Competitive diffs / matchup context (per player orientation)
   "rank_diff",
   "pts_diff",
@@ -27,6 +27,12 @@ export const GRU_SEQUENCE_FEATURES = [
   // Surface momentum
   "surface_trend",
 ];
+
+const GRU_FEATURES_OPTIMIZED = true;
+const OPTIMIZED_DROPS = new Set(["rank_diff"]);
+export const GRU_SEQUENCE_FEATURES = GRU_FEATURES_OPTIMIZED
+  ? BASE_GRU_SEQUENCE_FEATURES.filter((f) => !OPTIMIZED_DROPS.has(f))
+  : BASE_GRU_SEQUENCE_FEATURES.slice();
 
 const DEPRECATED_SEQUENCE_FEATURES = new Set([
   "rolling_win_rate_10",
@@ -53,16 +59,17 @@ const REQUIRED_SEQUENCE_COLUMNS = [
 ];
 
 export class DataLoader {
-  constructor(modelType = "MLP", seqLen = 10) {
+  constructor(modelType = "MLP", seqLen = 8, options = {}) {
     this.modelType = modelType;
     this.seqLen = seqLen;
+    this.enableSequenceDebug = Boolean(options.enableSequenceDebug);
     this.featureListMLP = [
       "rank_diff", "pts_diff", "odd_diff",
       "h2h_advantage", "last_winner", "surface_winrate_adv", "year"
     ];
     this.featureListGRU = GRU_SEQUENCE_FEATURES.slice();
     this.numericCols = this.featureListMLP.slice();
-    this.sequenceFeatureCols = GRU_SEQUENCE_FEATURES.slice();
+    this.sequenceFeatureCols = this._buildSequenceFeatureList();
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
       "Tournament", "Date", "Best of", "Best_of", "Player_1", "Player_2", "Winner", "Score",
@@ -236,11 +243,6 @@ export class DataLoader {
         std,
         flipOnReverse: this._flipOnReverse,
       });
-      const seqAll = buildSequences(filtered, this.seqLen, featureList, {
-        mean,
-        std,
-        flipOnReverse: this._flipOnReverse,
-      });
 
       if (seqTrain.stats.paddingPercent > 90) {
         throw new Error("Sequence length exceeds available match history for most players");
@@ -260,7 +262,7 @@ export class DataLoader {
 
       const combinedFeatureList = seqTrain.meta.featureList.slice();
       this.featureNames = combinedFeatureList.slice();
-      this.sequenceDebug = seqAll;
+      this.sequenceDebug = this.enableSequenceDebug ? buildSequences(filtered, this.seqLen, featureList, { mean, std, flipOnReverse: this._flipOnReverse }) : seqTrain;
       this.meta = {
         modelType: this.modelType,
         featureList: combinedFeatureList,
@@ -566,6 +568,7 @@ export class DataLoader {
 
   _buildSequenceFeatureList(headers) {
     const base = GRU_SEQUENCE_FEATURES.slice();
+    if (!headers || headers.length === 0) return base.filter((f) => !DEPRECATED_SEQUENCE_FEATURES.has(f));
     const missing = base.filter((f) => !headers.includes(f) && !DEPRECATED_SEQUENCE_FEATURES.has(f));
     if (missing.length > 0) {
       throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);

@@ -7,12 +7,13 @@ import { buildRNNModel } from "./models/rnn-model.js";
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
-const GRU_SEQ_LEN = 10;
+const GRU_SEQ_LEN = 8;
+const FAST_MODE_SEQ_LEN = 6;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.flatMap((f) => [`p1_${f}`, `p2_${f}`]);
 const SEQUENCE_MODES = new Set(["RNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
-  validationSplit: 0.2,
+  validationSplit: 0.1,
   hiddenUnits: [128, 64],
   dropout: 0.3,
 };
@@ -23,18 +24,29 @@ const DEFAULT_RNN_CONFIG = {
   learningRate: 0.001,
   batchSize: 64,
 };
+const FAST_MODE_PRESETS = {
+  units: 8,
+  denseUnits: 16,
+  dropout: 0,
+  learningRate: 0.001,
+  batchSize: 128,
+  epochs: 3,
+  validationSplit: 0.05,
+  seqLen: FAST_MODE_SEQ_LEN,
+};
+let backendInitialized = false;
 
 async function ensureWebGLBackend() {
   try {
     await tf.ready();
     const current = tf.getBackend();
+    if (backendInitialized && current === "webgl") return;
     if (current !== "webgl") {
       await tf.setBackend("webgl");
       await tf.ready();
       log(`Backend switched to ${tf.getBackend()} for accelerated GRU training.`);
-    } else {
-      console.log("WebGL backend already active");
     }
+    backendInitialized = true;
   } catch (err) {
     console.warn("Failed to switch backend", err);
     log(`Warning: could not switch backend — ${err.message}`);
@@ -92,6 +104,7 @@ const els = {
   valSplitInput: document.getElementById("valSplitInput"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
   gruSeqLenInput: document.getElementById("gruSeqLen"),
+  fastModeInput: document.getElementById("fastMode"),
 };
 
 const CATEGORY_FIELDS = [
@@ -131,6 +144,23 @@ function setModeClass(mode) {
   else document.body.classList.add("mode-mlp");
 }
 
+function applyFastModePreset() {
+  if (!els.fastModeInput?.checked) return;
+  if (els.rnnUnitsInput) els.rnnUnitsInput.value = FAST_MODE_PRESETS.units;
+  if (els.rnnDenseUnitsInput) els.rnnDenseUnitsInput.value = FAST_MODE_PRESETS.denseUnits;
+  if (els.rnnDropoutInput) els.rnnDropoutInput.value = FAST_MODE_PRESETS.dropout;
+  if (els.rnnLrInput) els.rnnLrInput.value = FAST_MODE_PRESETS.learningRate;
+  if (els.rnnBatchInput) els.rnnBatchInput.value = FAST_MODE_PRESETS.batchSize;
+  if (els.epochsInput) els.epochsInput.value = FAST_MODE_PRESETS.epochs;
+  if (els.valSplitInput) els.valSplitInput.value = FAST_MODE_PRESETS.validationSplit;
+  if (els.gruSeqLenInput) els.gruSeqLenInput.value = FAST_MODE_PRESETS.seqLen;
+  log("Fast Mode enabled: applied lightweight GRU presets.");
+  if (loader && lastCSVText) {
+    log("Rebuilding sequences with Fast Mode window (reload in progress)...");
+    parseAndInit(lastCSVText);
+  }
+}
+
 function toggleHyperparamVisibility(mode) {
   setModeClass(mode);
   if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = mode !== "RNN";
@@ -144,6 +174,7 @@ function isSequenceMode(mode = currentModelType) {
 }
 
 function getSelectedSeqLen() {
+  if (els.fastModeInput?.checked) return FAST_MODE_PRESETS.seqLen;
   const val = parseInt(els.gruSeqLenInput?.value ?? GRU_SEQ_LEN, 10);
   return Number.isInteger(val) && val > 0 ? val : GRU_SEQ_LEN;
 }
@@ -316,7 +347,7 @@ async function parseAndInit(text) {
     const trainCount = dataset.X_train.shape[0];
     const testCount = dataset.X_test.shape[0];
     const featureCount = dataset.featureNames.length;
-    const modeLine = `Mode: ${currentModelType}` + (isSequenceMode(currentModelType) ? ` | SeqLen: ${seqLen}` : "");
+  const modeLine = `Mode: ${currentModelType}` + (isSequenceMode(currentModelType) ? ` | SeqLen: ${seqLen}` : "");
     els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
     log(`${currentModelType} MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
     if (featureCount < 15) {
@@ -760,6 +791,7 @@ async function trainModel() {
       epochs: hyper.training.epochs,
       batchSize: hyper.training.batchSize,
       validationSplit: hyper.validationSplit,
+      // TODO: consider pre-slicing validationData to avoid in-fit array splits when profiling performance further.
       callbacks: {
         onEpochEnd: (epoch, logs) => {
           const val = logs.val_acc ?? logs.val_accuracy ?? 0;
@@ -769,7 +801,7 @@ async function trainModel() {
           log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${accPct}% val_acc=${valPct}%`);
           losses.push(Number(logs.loss));
           valAcc.push(Number(val));
-          if ((epoch + 1) % 2 === 0 || epoch + 1 === hyper.training.epochs) {
+          if ((epoch + 1) % 3 === 0 || epoch + 1 === hyper.training.epochs) {
             drawLossChart(losses, valAcc);
           }
         }
@@ -877,18 +909,25 @@ async function loadCurrentModel() {
 
 function drawLossChart(losses, valAcc) {
   const ctx = els.lossCanvas.getContext("2d");
-  if (lossChart) lossChart.destroy();
-  lossChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: losses.map((_, i) => `E${i + 1}`),
-      datasets: [
-        { label: "Loss", data: losses, borderColor: "#6aa8ff", tension: 0.2 },
-        { label: "Val Accuracy", data: valAcc, borderColor: "#50fa7b", tension: 0.2 }
-      ]
-    },
-    options: { responsive: true, maintainAspectRatio: false }
-  });
+  const labels = losses.map((_, i) => `E${i + 1}`);
+  if (!lossChart) {
+    lossChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "Loss", data: losses.slice(), borderColor: "#6aa8ff", tension: 0.2 },
+          { label: "Val Accuracy", data: valAcc.slice(), borderColor: "#50fa7b", tension: 0.2 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  } else {
+    lossChart.data.labels = labels;
+    lossChart.data.datasets[0].data = losses.slice();
+    lossChart.data.datasets[1].data = valAcc.slice();
+    lossChart.update("none");
+  }
 }
 
 function drawConfusionMatrix({ tp, tn, fp, fn }) {
@@ -955,6 +994,11 @@ els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
 els.gruExampleBtn.addEventListener("click", () => renderGruExample());
+if (els.fastModeInput) {
+  els.fastModeInput.addEventListener("change", () => {
+    applyFastModePreset();
+  });
+}
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
@@ -964,13 +1008,28 @@ showPredictPanel(false);
 resetGruDebug();
 resetGruPredictDebug();
 toggleHyperparamVisibility(currentModelType);
+applyFastModePreset();
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
 function readRnnHyperparameters() {
+  const fastMode = Boolean(els.fastModeInput?.checked);
+  if (fastMode) {
+    return {
+      training: { epochs: FAST_MODE_PRESETS.epochs, batchSize: FAST_MODE_PRESETS.batchSize, rawBatch: FAST_MODE_PRESETS.batchSize },
+      architecture: {
+        units: FAST_MODE_PRESETS.units,
+        denseUnits: FAST_MODE_PRESETS.denseUnits,
+        dropout: FAST_MODE_PRESETS.dropout,
+        learningRate: FAST_MODE_PRESETS.learningRate,
+      },
+      validationSplit: FAST_MODE_PRESETS.validationSplit,
+    };
+  }
+
   const epochs = clampInt(els.epochsInput.value, 1, 200, 3);
   const rawBatch = Number.parseInt(els.rnnBatchInput?.value ?? DEFAULT_RNN_CONFIG.batchSize, 10);
-  const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_RNN_CONFIG.batchSize);
+  const batchSize = clampInt(rawBatch, 8, 128, DEFAULT_RNN_CONFIG.batchSize);
   const units = clampInt(els.rnnUnitsInput?.value, 4, 64, DEFAULT_RNN_CONFIG.units);
   const denseUnits = clampInt(els.rnnDenseUnitsInput?.value, 4, 128, DEFAULT_RNN_CONFIG.denseUnits);
   const rawDropout = Number.parseFloat(els.rnnDropoutInput?.value ?? DEFAULT_RNN_CONFIG.dropout);
@@ -979,7 +1038,7 @@ function readRnnHyperparameters() {
   const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_RNN_CONFIG.learningRate;
   const valSplitRaw = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
   const validationSplit = Number.isFinite(valSplitRaw) ? Math.min(Math.max(valSplitRaw, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
-  if (units > 64 || denseUnits > 128 || batchSize > 64) {
+  if (units > 64 || denseUnits > 128 || batchSize > 128) {
     throw new Error("Too heavy configuration — running in browser. Reduce units or batch size.");
   }
   return {

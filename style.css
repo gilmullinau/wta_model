@@ -97,6 +97,14 @@ header .subtitle {
   min-width: 160px;
 }
 
+.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .model-row select,
 .model-row input[type="number"] {
   padding: 6px 8px;
