@@ -21,7 +21,7 @@ const DEFAULT_RNN_CONFIG = {
   denseUnits: 32,
   dropout: 0,
   learningRate: 0.001,
-  batchSize: 32,
+  batchSize: 64,
 };
 
 async function ensureWebGLBackend() {
@@ -739,6 +739,7 @@ async function trainModel() {
   try {
     const hyper = readRnnHyperparameters();
     lastRnnConfig = hyper;
+    log(`Backend: ${tf.getBackend()} | epochs=${hyper.training.epochs} | batch=${hyper.training.batchSize}`);
     const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
     const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
     console.log("RNN tensor check:", tensorsAreValid, testTensorsValid);
@@ -762,7 +763,10 @@ async function trainModel() {
       callbacks: {
         onEpochEnd: (epoch, logs) => {
           const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${Number(logs.acc ?? logs.accuracy ?? 0).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
+          const acc = Number(logs.acc ?? logs.accuracy ?? 0);
+          const accPct = (acc * 100).toFixed(1);
+          const valPct = (Number(val) * 100).toFixed(1);
+          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${accPct}% val_acc=${valPct}%`);
           losses.push(Number(logs.loss));
           valAcc.push(Number(val));
           if ((epoch + 1) % 2 === 0 || epoch + 1 === hyper.training.epochs) {
@@ -964,7 +968,7 @@ autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
 function readRnnHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const epochs = clampInt(els.epochsInput.value, 1, 200, 3);
   const rawBatch = Number.parseInt(els.rnnBatchInput?.value ?? DEFAULT_RNN_CONFIG.batchSize, 10);
   const batchSize = clampInt(rawBatch, 8, 64, DEFAULT_RNN_CONFIG.batchSize);
   const units = clampInt(els.rnnUnitsInput?.value, 4, 64, DEFAULT_RNN_CONFIG.units);
