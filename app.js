@@ -7,7 +7,7 @@ import { buildRNNModel } from "./models/rnn-model.js";
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
-const GRU_SEQ_LEN = 8;
+const GRU_SEQ_LEN = 10;
 const FAST_MODE_SEQ_LEN = 6;
 const GRU_FEATURES = GRU_SEQUENCE_FEATURES.flatMap((f) => [`p1_${f}`, `p2_${f}`]);
 const SEQUENCE_MODES = new Set(["RNN"]);

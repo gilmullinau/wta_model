@@ -28,11 +28,8 @@ const BASE_GRU_SEQUENCE_FEATURES = [
   "surface_trend",
 ];
 
-const GRU_FEATURES_OPTIMIZED = true;
-const OPTIMIZED_DROPS = new Set(["rank_diff"]);
-export const GRU_SEQUENCE_FEATURES = GRU_FEATURES_OPTIMIZED
-  ? BASE_GRU_SEQUENCE_FEATURES.filter((f) => !OPTIMIZED_DROPS.has(f))
-  : BASE_GRU_SEQUENCE_FEATURES.slice();
+// Accuracy-focused full feature list (14 engineered columns).
+export const GRU_SEQUENCE_FEATURES = BASE_GRU_SEQUENCE_FEATURES.slice();
 
 const DEPRECATED_SEQUENCE_FEATURES = new Set([
   "rolling_win_rate_10",
@@ -59,7 +56,7 @@ const REQUIRED_SEQUENCE_COLUMNS = [
 ];
 
 export class DataLoader {
-  constructor(modelType = "MLP", seqLen = 8, options = {}) {
+  constructor(modelType = "MLP", seqLen = 10, options = {}) {
     this.modelType = modelType;
     this.seqLen = seqLen;
     this.enableSequenceDebug = Boolean(options.enableSequenceDebug);
