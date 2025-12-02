@@ -7,12 +7,15 @@ const tf = window.tf;
 const SCENARIO_YEAR = 2025;
 
 export const GRU_SEQUENCE_FEATURES = [
+  // Core competitive diffs
   "rank_diff",
   "pts_diff",
   "odd_diff",
   "h2h_advantage",
   "last_winner",
   "surface_winrate_adv",
+
+  // Form and fatigue dynamics
   "recent_win_rate_5",
   "recent_win_rate_10",
   "rolling_win_rate_10",
@@ -21,6 +24,8 @@ export const GRU_SEQUENCE_FEATURES = [
   "fatigue_7d",
   "fatigue_14d",
   "fatigue_30d",
+
+  // Surface-specific momentum (legacy per-surface WR columns removed)
   "surface_trend",
   "year",
 ];
@@ -40,6 +45,7 @@ export class DataLoader {
     this.dropCols = [
       "Tournament", "Date", "Best of", "Best_of", "Player_1", "Player_2", "Winner", "Score",
       "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2",
+      // Explicitly drop legacy surface win-rate columns so they cannot leak back in exported CSVs
       "surface_win_rate_hard_5", "surface_win_rate_clay_5", "surface_win_rate_grass_5",
     ];
     this.labelCol = "y";
@@ -53,6 +59,7 @@ export class DataLoader {
     this.playerStats = new Map();
     this.categoryOptions = new Map();
     this.sequenceRows = [];
+    this.cleanedRows = [];
     this.meta = {
       modelType,
       featureList: [],
@@ -169,6 +176,11 @@ export class DataLoader {
       };
       filtered.push(augmented);
       filteredMeta.push(meta);
+    });
+    this.cleanedRows = filtered.map((row) => {
+      const copy = { ...row };
+      delete copy.__meta;
+      return copy;
     });
     this.sequenceRows = filtered.map((row) => ({ ...row }));
     this._prepareMatchIndex(filteredMeta);
@@ -292,6 +304,10 @@ export class DataLoader {
     return this.sequenceRows.slice();
   }
 
+  getCleanedRows() {
+    return this.cleanedRows.map((row) => ({ ...row }));
+  }
+
   buildSequenceInputForMatch(player, seqLen = this.seqLen) {
     if (!this.isSequenceMode()) {
       throw new Error("Sequence mode (GRU/RNN) is required to build inputs.");
@@ -397,7 +413,7 @@ export class DataLoader {
     for (const { row, meta } of zipped) {
       const player = (meta?.player1 || meta?.player || row.player || "").toString().trim();
       const surface = (meta?.surface || row.Surface || row.surface || "").toString().trim();
-      if (!player) {
+      if (!player || !surface) {
         row.surface_trend = 0;
         if (meta?.numeric) meta.numeric.surface_trend = 0;
         continue;

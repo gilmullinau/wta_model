@@ -59,6 +59,7 @@ const els = {
   evalBtn: document.getElementById("evalBtn"),
   saveBtn: document.getElementById("saveBtn"),
   loadModelBtn: document.getElementById("loadModelBtn"),
+  downloadDatasetBtn: document.getElementById("downloadDatasetBtn"),
   logs: document.getElementById("logs"),
   info: document.getElementById("info"),
   lossCanvas: document.getElementById("lossChart"),
@@ -109,6 +110,15 @@ function log(msg) {
     els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
   }
   els.logs.scrollTop = els.logs.scrollHeight;
+}
+
+function toCsvValue(value) {
+  if (value === null || value === undefined) return "";
+  const str = value.toString();
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
 }
 
 function getSelectedModelType() {
@@ -253,6 +263,38 @@ function showPredictPanel(show) {
   }
 }
 
+function updateCleanDownloadState() {
+  if (!els.downloadDatasetBtn) return;
+  const hasClean = loader && typeof loader.getCleanedRows === "function" && loader.getCleanedRows().length > 0;
+  els.downloadDatasetBtn.disabled = !hasClean;
+}
+
+function downloadCleanDataset() {
+  if (!loader || !els.downloadDatasetBtn) {
+    log("No dataset loader available for export.");
+    return;
+  }
+  const rows = loader.getCleanedRows();
+  if (!rows || rows.length === 0) {
+    log("No cleaned dataset available to export.");
+    return;
+  }
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.join(",")];
+  rows.forEach((r) => {
+    const line = headers.map((h) => toCsvValue(r[h])).join(",");
+    lines.push(line);
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "feature_engineered_v2.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`Clean dataset exported (${rows.length} rows, ${headers.length} columns) without legacy surface win-rate fields.`);
+}
+
 async function parseAndInit(text) {
   try {
     await ensureWebGLBackend();
@@ -284,12 +326,14 @@ async function parseAndInit(text) {
     enableTraining(ok);
     buildPredictForm();
     els.saveBtn.disabled = true;
+    updateCleanDownloadState();
     showPredictPanel(false);
   } catch (err) {
     console.error(err);
     els.info.textContent = `Dataset error: ${err.message}`;
     log(`Dataset error: ${err.message}`);
     enableTraining(false);
+    updateCleanDownloadState();
   }
 }
 
@@ -898,6 +942,9 @@ els.player1Select.addEventListener("change", handlePlayer1Change);
 els.player2Select.addEventListener("change", updateAutoPreview);
 els.predictBtn.addEventListener("click", handlePredict);
 els.loadFileBtn.addEventListener("click", handleManualFileLoad);
+if (els.downloadDatasetBtn) {
+  els.downloadDatasetBtn.addEventListener("click", downloadCleanDataset);
+}
 els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
