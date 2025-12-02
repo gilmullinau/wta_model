@@ -28,6 +28,11 @@ export const GRU_SEQUENCE_FEATURES = [
   "surface_trend",
 ];
 
+const DEPRECATED_SEQUENCE_FEATURES = new Set([
+  "rolling_win_rate_10",
+  "streak",
+]);
+
 const REQUIRED_SEQUENCE_COLUMNS = [
   "y",
   "match_date",
@@ -561,11 +566,11 @@ export class DataLoader {
 
   _buildSequenceFeatureList(headers) {
     const base = GRU_SEQUENCE_FEATURES.slice();
-    const missing = base.filter((f) => !headers.includes(f));
+    const missing = base.filter((f) => !headers.includes(f) && !DEPRECATED_SEQUENCE_FEATURES.has(f));
     if (missing.length > 0) {
       throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);
     }
-    return base;
+    return base.filter((f) => !DEPRECATED_SEQUENCE_FEATURES.has(f));
   }
 
   _buildDesignMatrix(rows, featureNames = null) {
