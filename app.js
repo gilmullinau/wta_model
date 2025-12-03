@@ -971,13 +971,42 @@ async function handlePredict(e) {
   }
 }
 
+function mirrorSequenceForPlayers(sequence) {
+  if (!Array.isArray(sequence) || sequence.length === 0) {
+    throw new Error("Cannot mirror an empty sequence");
+  }
+  const stepSize = sequence[0].length;
+  if (stepSize % 2 !== 0) throw new Error("Sequence step length must be even to mirror player halves");
+  const half = stepSize / 2;
+  return sequence.map((step) => {
+    const p1 = step.slice(0, half);
+    const p2 = step.slice(half);
+    return p2.concat(p1);
+  });
+}
+
 async function symmetricPredict(player1, player2, seqLen) {
   const forward = loader.buildSequenceInputForMatch(player1, player2, seqLen);
-  const reverse = loader.buildSequenceInputForMatch(player2, player1, seqLen);
 
-  if (!forward.sequence || forward.sequence.length === 0 || !reverse.sequence || reverse.sequence.length === 0) {
+  if (!forward.sequence || forward.sequence.length === 0) {
     throw new Error("No history available to build symmetric sequences for prediction.");
   }
+
+  const mirroredSeq = mirrorSequenceForPlayers(forward.sequence);
+  const reverseTensor = tf.tensor3d([mirroredSeq], [1, seqLen, forward.featureList.length], "float32");
+  const reverse = {
+    tensor: reverseTensor,
+    sequence: mirroredSeq,
+    featureList: forward.featureList.slice(),
+    meta: {
+      player1: player2,
+      player2: player1,
+      latestDate: forward.meta.latestDate,
+      padded: forward.meta.padded,
+      usedRows: forward.meta.usedRows,
+      mirrored: true,
+    },
+  };
 
   const batch = tf.concat([forward.tensor, reverse.tensor], 0);
   const preds = model.predict(batch);
