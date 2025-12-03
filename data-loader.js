@@ -1,7 +1,7 @@
 // data-loader.js
 // Reads CSV text, preprocesses: drop leakage columns, numeric scaling, one-hot for categoricals,
 // stratified split train/test, returns tf.Tensors and feature metadata.
-import { buildSequences } from "./sequence-builder.js";
+import { augmentWithMirrorExamples, buildSequences } from "./sequence-builder.js";
 
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
@@ -241,15 +241,34 @@ export class DataLoader {
         flipOnReverse: this._flipOnReverse,
       });
 
+      const trainAug = augmentWithMirrorExamples(seqTrain.X, seqTrain.y, seqTrain.meta.sampleInfo);
+      const testAug = augmentWithMirrorExamples(seqTest.X, seqTest.y, seqTest.meta.sampleInfo);
+
+      const seqTrainAug = {
+        ...seqTrain,
+        X: trainAug.X,
+        y: trainAug.y,
+        meta: { ...seqTrain.meta, sampleInfo: trainAug.sampleInfo || seqTrain.meta.sampleInfo },
+        stats: { ...seqTrain.stats, numSamples: trainAug.X.length },
+      };
+
+      const seqTestAug = {
+        ...seqTest,
+        X: testAug.X,
+        y: testAug.y,
+        meta: { ...seqTest.meta, sampleInfo: testAug.sampleInfo || seqTest.meta.sampleInfo },
+        stats: { ...seqTest.stats, numSamples: testAug.X.length },
+      };
+
       if (seqTrain.stats.paddingPercent > 90) {
         throw new Error("Sequence length exceeds available match history for most players");
       }
 
       const numFeatures = seqTrain.meta.numFeatures;
-      const X_train = tf.tensor3d(seqTrain.X, [seqTrain.stats.numSamples, this.seqLen, numFeatures], "float32");
-      const y_train = tf.tensor1d(seqTrain.y, "float32");
-      const X_test = tf.tensor3d(seqTest.X, [seqTest.stats.numSamples, this.seqLen, numFeatures], "float32");
-      const y_test = tf.tensor1d(seqTest.y, "float32");
+      const X_train = tf.tensor3d(seqTrainAug.X, [seqTrainAug.stats.numSamples, this.seqLen, numFeatures], "float32");
+      const y_train = tf.tensor1d(seqTrainAug.y, "float32");
+      const X_test = tf.tensor3d(seqTestAug.X, [seqTestAug.stats.numSamples, this.seqLen, numFeatures], "float32");
+      const y_test = tf.tensor1d(seqTestAug.y, "float32");
 
       console.log("GRU tensors created", X_train instanceof tf.Tensor, y_train instanceof tf.Tensor, X_test instanceof tf.Tensor, y_test instanceof tf.Tensor);
       this.X_train = X_train;
@@ -259,7 +278,9 @@ export class DataLoader {
 
       const combinedFeatureList = seqTrain.meta.featureList.slice();
       this.featureNames = combinedFeatureList.slice();
-      this.sequenceDebug = this.enableSequenceDebug ? buildSequences(filtered, this.seqLen, featureList, { mean, std, flipOnReverse: this._flipOnReverse }) : seqTrain;
+      this.sequenceDebug = this.enableSequenceDebug
+        ? buildSequences(filtered, this.seqLen, featureList, { mean, std, flipOnReverse: this._flipOnReverse })
+        : seqTrainAug;
       this.meta = {
         modelType: this.modelType,
         featureList: combinedFeatureList,
@@ -268,7 +289,7 @@ export class DataLoader {
         featureCount: combinedFeatureList.length,
         mean,
         std,
-        stats: seqTrain.stats,
+        stats: seqTrainAug.stats,
         baseFeatureList: featureList.slice(),
       };
 
@@ -285,7 +306,7 @@ export class DataLoader {
           featureIndexMap: seqTrain.meta.featureIndexMap,
           modelType: this.modelType,
           seqLen: this.seqLen,
-          stats: seqTrain.stats,
+          stats: seqTrainAug.stats,
           baseFeatureList: featureList.slice(),
         }
       };

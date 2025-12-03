@@ -122,3 +122,51 @@ export function buildSequences(rows, seqLen, featureList, opts = {}) {
     }
   };
 }
+
+export function augmentWithMirrorExamples(X, y, sampleInfo = null) {
+  if (!Array.isArray(X) || !Array.isArray(y)) {
+    throw new Error("augmentWithMirrorExamples expects array inputs for X and y");
+  }
+  if (X.length !== y.length) {
+    throw new Error("X and y must have the same number of samples to mirror");
+  }
+  const mirroredX = [];
+  const mirroredY = [];
+  const mirroredInfo = [];
+
+  for (let i = 0; i < X.length; i += 1) {
+    const seq = X[i];
+    if (!Array.isArray(seq) || seq.length === 0) {
+      throw new Error("Sequence is empty or invalid during mirror augmentation");
+    }
+    const stepLen = seq[0]?.length;
+    if (!Number.isInteger(stepLen) || stepLen % 2 !== 0) {
+      throw new Error("Sequence timestep length must be even to swap player halves");
+    }
+    const half = stepLen / 2;
+    const mirroredSeq = seq.map((step) => {
+      const p1 = step.slice(0, half);
+      const p2 = step.slice(half);
+      return p2.concat(p1);
+    });
+    mirroredX.push(mirroredSeq);
+    mirroredY.push(1 - y[i]);
+
+    if (Array.isArray(sampleInfo)) {
+      const info = sampleInfo[i] || {};
+      mirroredInfo.push({
+        ...info,
+        player1: info.player2 ?? info.player1,
+        player2: info.player1 ?? info.player2,
+        label: Number.isFinite(info.label) ? 1 - info.label : info.label,
+        mirrored: true,
+      });
+    }
+  }
+
+  return {
+    X: X.concat(mirroredX),
+    y: y.concat(mirroredY),
+    sampleInfo: Array.isArray(sampleInfo) ? sampleInfo.concat(mirroredInfo) : sampleInfo,
+  };
+}
