@@ -1,19 +1,78 @@
 // data-loader.js
 // Reads CSV text, preprocesses: drop leakage columns, numeric scaling, one-hot for categoricals,
 // stratified split train/test, returns tf.Tensors and feature metadata.
+import { augmentWithMirrorExamples, buildSequences } from "./sequence-builder.js";
+
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
 
+const BASE_GRU_SEQUENCE_FEATURES = [
+  // Competitive diffs / matchup context (per player orientation)
+  "rank_diff",
+  "pts_diff",
+  "odd_diff",
+  "h2h_advantage",
+  "last_winner",
+  "surface_winrate_adv",
+  "year",
+
+  // Dynamic form / fatigue
+  "recent_win_rate_5",
+  "recent_win_rate_10",
+  "streak_value",
+  "fatigue_7d",
+  "fatigue_14d",
+  "fatigue_30d",
+
+  // Surface momentum
+  "surface_trend",
+];
+
+// Accuracy-focused full feature list (14 engineered columns).
+export const GRU_SEQUENCE_FEATURES = BASE_GRU_SEQUENCE_FEATURES.slice();
+
+const DEPRECATED_SEQUENCE_FEATURES = new Set([
+  "rolling_win_rate_10",
+  "streak",
+]);
+
+const REQUIRED_SEQUENCE_COLUMNS = [
+  "y",
+  "match_date",
+  "Date",
+  "Player_1",
+  "Player_2",
+  "Rank_1",
+  "Rank_2",
+  "Pts_1",
+  "Pts_2",
+  "Odd_1",
+  "Odd_2",
+  "Tournament",
+  ...GRU_SEQUENCE_FEATURES,
+  "Surface",
+  "Court",
+  "Round",
+];
+
 export class DataLoader {
-  constructor() {
-    this.numericCols = [
+  constructor(modelType = "MLP", seqLen = 10, options = {}) {
+    this.modelType = modelType;
+    this.seqLen = seqLen;
+    this.enableSequenceDebug = Boolean(options.enableSequenceDebug);
+    this.featureListMLP = [
       "rank_diff", "pts_diff", "odd_diff",
       "h2h_advantage", "last_winner", "surface_winrate_adv", "year"
     ];
+    this.featureListGRU = GRU_SEQUENCE_FEATURES.slice();
+    this.numericCols = this.featureListMLP.slice();
+    this.sequenceFeatureCols = this._buildSequenceFeatureList();
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
-      "Tournament", "Date", "Best of", "Player_1", "Player_2", "Winner", "Score",
-      "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2"
+      "Tournament", "Date", "Best of", "Best_of", "Player_1", "Player_2", "Winner", "Score",
+      "Rank_1","Rank_2","Pts_1","Pts_2","Odd_1","Odd_2",
+      // Explicitly drop legacy surface win-rate columns so they cannot leak back in exported CSVs
+      "surface_win_rate_hard_5", "surface_win_rate_clay_5", "surface_win_rate_grass_5",
     ];
     this.labelCol = "y";
     this.catLevels = {};
@@ -25,9 +84,24 @@ export class DataLoader {
     this.opponentMap = new Map();
     this.playerStats = new Map();
     this.categoryOptions = new Map();
+    this.sequenceRows = [];
+    this.cleanedRows = [];
+    this.meta = {
+      modelType,
+      featureList: [],
+      featureIndexMap: {},
+      seqLen: this.isSequenceMode() ? seqLen : null,
+      mean: {},
+      std: {},
+    };
     this._flipOnReverse = new Set([
-      "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv"
+      "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv", "last_winner"
     ]);
+    this.sequenceDebug = null;
+  }
+
+  isSequenceMode() {
+    return this.modelType === "GRU" || this.modelType === "RNN";
   }
 
   async loadCSVText(csvText) {
@@ -56,17 +130,26 @@ export class DataLoader {
       throw new Error(`Missing expected columns — ${missing.join("; ")}`);
     }
 
+    if (this.isSequenceMode()) {
+      const missingReq = REQUIRED_SEQUENCE_COLUMNS.filter((c) => !headers.includes(c));
+      if (missingReq.length > 0) {
+        throw new Error(`Missing required CSV columns for sequences: ${missingReq.join(", ")}`);
+      }
+    }
+
+    this.sequenceFeatureCols = this._buildSequenceFeatureList(headers);
+
     const metaRows = raw.map((row) => ({
       player1: (row["Player_1"] ?? "").toString().trim(),
       player2: (row["Player_2"] ?? "").toString().trim(),
-      date: (row["Date"] ?? "").toString().trim(),
+      date: (row["match_date"] ?? row["Date"] ?? "").toString().trim(),
       surface: (row["Surface"] ?? "").toString().trim(),
       court: (row["Court"] ?? "").toString().trim(),
       round: (row["Round"] ?? "").toString().trim(),
       numeric: {},
       categorical: {},
       label: NaN,
-      timestamp: this._parseDate((row["Date"] ?? "").toString().trim()),
+      timestamp: this._parseDate((row["match_date"] ?? row["Date"] ?? "").toString().trim()),
       rank1: this._toNumber(row["Rank_1"]),
       rank2: this._toNumber(row["Rank_2"]),
       pts1: this._toNumber(row["Pts_1"]),
@@ -85,6 +168,11 @@ export class DataLoader {
         row[c] = num;
         meta.numeric[c] = num;
       }
+      for (const c of this.sequenceFeatureCols) {
+        const num = this._toNumber(row[c]);
+        row[c] = Number.isFinite(num) ? num : 0;
+        meta.numeric[c] = row[c];
+      }
       for (const col of this.categoricalCols) {
         const str = (row[col] ?? "").toString().trim();
         row[col] = str;
@@ -95,6 +183,8 @@ export class DataLoader {
       }
     });
 
+    this._recomputeSurfaceTrend(raw, metaRows);
+
     const filtered = [];
     const filteredMeta = [];
     raw.forEach((row, idx) => {
@@ -102,9 +192,32 @@ export class DataLoader {
       for (const c of this.numericCols) {
         if (!Number.isFinite(row[c])) return;
       }
-      filtered.push(row);
-      filteredMeta.push(metaRows[idx]);
+      if (this.isSequenceMode()) {
+        for (const feat of this.sequenceFeatureCols) {
+          const val = this._toNumber(row[feat]);
+          if (!Number.isFinite(val)) return;
+        }
+      }
+      const meta = metaRows[idx];
+      const augmented = {
+        ...row,
+        player: meta.player1,
+        player1: meta.player1,
+        player2: meta.player2,
+        date: meta.date,
+        timestamp: meta.timestamp,
+        __meta: meta,
+      };
+      filtered.push(augmented);
+      filteredMeta.push(meta);
     });
+    this.cleanedRows = filtered.map((row) => {
+      const copy = { ...row };
+      delete copy.__meta;
+      return copy;
+    });
+    this.sequenceRows = filtered.map((row) => ({ ...row }));
+    this.sequenceRowsRaw = filtered.map((row) => ({ ...row }));
     this._prepareMatchIndex(filteredMeta);
     if (filtered.length < 10) throw new Error(`Too few valid rows: ${filtered.length}`);
 
@@ -112,6 +225,93 @@ export class DataLoader {
     const { trainRows, testRows } = this._splitRowsStratified(filtered, 0.2, 42);
 
     // Fit categorical levels and scalers only on training data
+    if (this.isSequenceMode()) {
+      const featureList = this.sequenceFeatureCols.slice();
+      this._validateGruFeatures(headers, featureList);
+      const { mean, std } = this._computeScalerForRows(trainRows, featureList);
+
+      const seqTrain = buildSequences(trainRows, this.seqLen, featureList, {
+        mean,
+        std,
+        flipOnReverse: this._flipOnReverse,
+      });
+      const seqTest = buildSequences(testRows, this.seqLen, featureList, {
+        mean,
+        std,
+        flipOnReverse: this._flipOnReverse,
+      });
+
+      const trainAug = augmentWithMirrorExamples(seqTrain.X, seqTrain.y, seqTrain.meta.sampleInfo);
+      const testAug = augmentWithMirrorExamples(seqTest.X, seqTest.y, seqTest.meta.sampleInfo);
+
+      const seqTrainAug = {
+        ...seqTrain,
+        X: trainAug.X,
+        y: trainAug.y,
+        meta: { ...seqTrain.meta, sampleInfo: trainAug.sampleInfo || seqTrain.meta.sampleInfo },
+        stats: { ...seqTrain.stats, numSamples: trainAug.X.length },
+      };
+
+      const seqTestAug = {
+        ...seqTest,
+        X: testAug.X,
+        y: testAug.y,
+        meta: { ...seqTest.meta, sampleInfo: testAug.sampleInfo || seqTest.meta.sampleInfo },
+        stats: { ...seqTest.stats, numSamples: testAug.X.length },
+      };
+
+      if (seqTrain.stats.paddingPercent > 90) {
+        throw new Error("Sequence length exceeds available match history for most players");
+      }
+
+      const numFeatures = seqTrain.meta.numFeatures;
+      const X_train = tf.tensor3d(seqTrainAug.X, [seqTrainAug.stats.numSamples, this.seqLen, numFeatures], "float32");
+      const y_train = tf.tensor1d(seqTrainAug.y, "float32");
+      const X_test = tf.tensor3d(seqTestAug.X, [seqTestAug.stats.numSamples, this.seqLen, numFeatures], "float32");
+      const y_test = tf.tensor1d(seqTestAug.y, "float32");
+
+      console.log("GRU tensors created", X_train instanceof tf.Tensor, y_train instanceof tf.Tensor, X_test instanceof tf.Tensor, y_test instanceof tf.Tensor);
+      this.X_train = X_train;
+      this.y_train = y_train;
+      this.X_test = X_test;
+      this.y_test = y_test;
+
+      const combinedFeatureList = seqTrain.meta.featureList.slice();
+      this.featureNames = combinedFeatureList.slice();
+      this.sequenceDebug = this.enableSequenceDebug
+        ? buildSequences(filtered, this.seqLen, featureList, { mean, std, flipOnReverse: this._flipOnReverse })
+        : seqTrainAug;
+      this.meta = {
+        modelType: this.modelType,
+        featureList: combinedFeatureList,
+        featureIndexMap: seqTrain.meta.featureIndexMap,
+        seqLen: this.seqLen,
+        featureCount: combinedFeatureList.length,
+        mean,
+        std,
+        stats: seqTrainAug.stats,
+        baseFeatureList: featureList.slice(),
+      };
+
+      return {
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        featureNames: this.featureNames,
+        artifacts: {
+          scaler: { mean, std },
+          featureNames: this.featureNames,
+          featureCount: combinedFeatureList.length,
+          featureIndexMap: seqTrain.meta.featureIndexMap,
+          modelType: this.modelType,
+          seqLen: this.seqLen,
+          stats: seqTrainAug.stats,
+          baseFeatureList: featureList.slice(),
+        }
+      };
+    }
+
     this._fitCategoricals(trainRows);
     const { X: X_train_raw, y: y_train, featureNames } = this._buildDesignMatrix(trainRows);
     this.featureNames = featureNames;
@@ -127,6 +327,14 @@ export class DataLoader {
     const xTestTensor = tf.tensor2d(X_test_scaled, [X_test_scaled.length, featureNames.length], "float32");
     const yTestTensor = tf.tensor2d(y_test.map(v => [v]), [y_test.length, 1], "float32");
 
+    this.meta = {
+      modelType: "MLP",
+      featureList: this.featureNames.slice(),
+      seqLen: null,
+      mean: this.scaler.mean,
+      std: this.scaler.std,
+    };
+
     return {
       X_train: xTrainTensor, y_train: yTrainTensor,
       X_test: xTestTensor, y_test: yTestTensor,
@@ -136,7 +344,9 @@ export class DataLoader {
         scaler: this.scaler,
         numericCols: this.numericCols,
         categoricalCols: this.categoricalCols,
-        featureNames: this.featureNames
+        featureNames: this.featureNames,
+        modelType: "MLP",
+        seqLen: null,
       }
     };
   }
@@ -149,6 +359,133 @@ export class DataLoader {
     if (!player) return [];
     const opponents = this.opponentMap.get(player);
     return opponents ? opponents.slice() : [];
+  }
+
+  getSequenceFeatureList() {
+    return this.sequenceFeatureCols.slice();
+  }
+
+  getSequenceRows() {
+    return this.sequenceRows.slice();
+  }
+
+  getSequenceDebug() {
+    return this.sequenceDebug ? { ...this.sequenceDebug, X: this.sequenceDebug.X.slice(), y: this.sequenceDebug.y.slice() } : null;
+  }
+
+  getCleanedRows() {
+    return this.cleanedRows.map((row) => ({ ...row }));
+  }
+
+  buildSequenceInputForMatch(player1, player2, seqLen = this.seqLen) {
+    if (!this.isSequenceMode()) {
+      throw new Error("Sequence mode (GRU/RNN) is required to build inputs.");
+    }
+    if (!player1 || !player2) throw new Error("Both Player 1 and Player 2 are required for prediction.");
+    const baseFeatures = this.meta.baseFeatureList?.length ? this.meta.baseFeatureList : this.sequenceFeatureCols;
+    const featureList = baseFeatures.flatMap((f) => [`p1_${f}`, `p2_${f}`]);
+    const mean = this.meta.mean || {};
+    const std = this.meta.std || {};
+
+    const history1 = this._collectPlayerHistory(player1, baseFeatures, mean, std);
+    const history2 = this._collectPlayerHistory(player2, baseFeatures, mean, std, true);
+
+    const seq1 = this._padSequence(history1.slice(-seqLen), seqLen, baseFeatures.length);
+    const seq2 = this._padSequence(history2.slice(-seqLen), seqLen, baseFeatures.length);
+    const sequence = seq1.map((step, idx) => step.concat(seq2[idx]));
+
+    const tensor = tf.tensor3d([sequence], [1, seqLen, baseFeatures.length * 2], "float32");
+    const latest1 = history1.length ? history1[history1.length - 1].date : "";
+    const latest2 = history2.length ? history2[history2.length - 1].date : "";
+    return {
+      tensor,
+      sequence,
+      featureList,
+      meta: {
+        player1,
+        player2,
+        latestDate: latest1 || latest2 || "",
+        padded: history1.length < seqLen || history2.length < seqLen,
+        usedRows: Math.min(seqLen, Math.min(history1.length, history2.length)),
+      }
+    };
+  }
+
+  buildPredictSequence(player, seqLen = this.seqLen) {
+    if (!player) throw new Error("Player name is required for GRU prediction.");
+    const featureList = this.sequenceFeatureCols.slice();
+    const rows = this.sequenceRows
+      .filter((r) => (r.player || "").toString() === player)
+      .sort((a, b) => {
+        const ta = Number.isFinite(a.timestamp) ? a.timestamp : -Infinity;
+        const tb = Number.isFinite(b.timestamp) ? b.timestamp : -Infinity;
+        return ta - tb;
+      });
+
+    const sequence = [];
+    const padding = Math.max(0, seqLen - rows.length);
+    for (let i = 0; i < padding; i++) {
+      sequence.push(Array.from({ length: featureList.length }, () => 0));
+    }
+
+    const recent = rows.slice(-seqLen);
+    for (const r of recent) {
+      const step = featureList.map((f) => {
+        const val = this._toNumber(r[f]);
+        return Number.isFinite(val) ? val : 0;
+      });
+      sequence.push(step);
+    }
+
+    return {
+      sequence,
+      featureList,
+      meta: {
+        player,
+        latestDate: recent.length > 0 ? (recent[recent.length - 1].date || "") : "",
+        padded: padding > 0,
+        usedRows: recent.length,
+      }
+    };
+  }
+
+  _recomputeSurfaceTrend(rows, metaRows) {
+    const history = new Map();
+    const zipped = rows.map((row, idx) => ({
+      row,
+      meta: metaRows[idx],
+      timestamp: Number.isFinite(metaRows[idx]?.timestamp) ? metaRows[idx].timestamp : -Infinity,
+    }));
+
+    zipped.sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const { row, meta } of zipped) {
+      const player = (meta?.player1 || meta?.player || row.player || "").toString().trim();
+      const surface = (meta?.surface || row.Surface || row.surface || "").toString().trim();
+      if (!player || !surface) {
+        row.surface_trend = 0;
+        if (meta?.numeric) meta.numeric.surface_trend = 0;
+        continue;
+      }
+
+      const key = `${player}|||${surface}`;
+      const past = history.get(key) || [];
+
+      const short = past.slice(-5);
+      const long = past.slice(-15);
+      const shortWr = short.length ? short.reduce((a, b) => a + b, 0) / short.length : 0;
+      const longWr = long.length ? long.reduce((a, b) => a + b, 0) / long.length : 0;
+      const trend = Math.max(-1, Math.min(1, shortWr - longWr));
+
+      const cleanTrend = Number.isFinite(trend) ? trend : 0;
+      row.surface_trend = cleanTrend;
+      if (meta?.numeric) meta.numeric.surface_trend = cleanTrend;
+
+      const isWinRaw = this._toNumber(row[this.labelCol]);
+      const isWin = Number.isFinite(isWinRaw) && isWinRaw >= 0.5 ? 1 : 0;
+      const updated = past.concat(isWin);
+      history.set(key, updated.length > 15 ? updated.slice(-15) : updated);
+    }
   }
 
   getPlayerSnapshot(player) {
@@ -245,6 +582,16 @@ export class DataLoader {
       }
       this.catLevels[col] = Array.from(set.values()).sort();
     }
+  }
+
+  _buildSequenceFeatureList(headers) {
+    const base = GRU_SEQUENCE_FEATURES.slice();
+    if (!headers || headers.length === 0) return base.filter((f) => !DEPRECATED_SEQUENCE_FEATURES.has(f));
+    const missing = base.filter((f) => !headers.includes(f) && !DEPRECATED_SEQUENCE_FEATURES.has(f));
+    if (missing.length > 0) {
+      throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);
+    }
+    return base.filter((f) => !DEPRECATED_SEQUENCE_FEATURES.has(f));
   }
 
   _buildDesignMatrix(rows, featureNames = null) {
@@ -538,5 +885,97 @@ export class DataLoader {
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
+  }
+
+  _validateGruFeatures(headers, featureList) {
+    const missing = featureList.filter((f) => !headers.includes(f));
+    if (missing.length > 0) {
+      throw new Error(`Missing feature(s) for sequence model: ${missing.join(", ")}`);
+    }
+  }
+
+  _computeScalerForRows(rows, featureList) {
+    const mean = {}, std = {};
+    featureList.forEach((f) => {
+      let sum = 0, sumSq = 0, count = 0;
+      for (const r of rows) {
+        const v = this._toNumber(r[f]);
+        if (!Number.isFinite(v)) {
+          throw new Error(`Missing feature ${f} in dataset`);
+        }
+        sum += v;
+        sumSq += v * v;
+        count += 1;
+      }
+      const mu = sum / Math.max(1, count);
+      const variance = Math.max(0, sumSq / Math.max(1, count) - mu * mu);
+      mean[f] = mu;
+      std[f] = Math.sqrt(variance);
+    });
+    return { mean, std };
+  }
+
+  _normalizeRowsForGru(rows, mean, std, featureList) {
+    return rows.map((row) => {
+      const normalized = { ...row };
+      featureList.forEach((f) => {
+        const raw = this._toNumber(row[f]);
+        if (!Number.isFinite(raw)) {
+          throw new Error(`Missing feature ${f} in dataset`);
+        }
+        const mu = mean[f] ?? 0;
+        const sigma = std[f] ?? 1;
+        const val = sigma === 0 ? 0 : (raw - mu) / sigma;
+        normalized[f] = Number.isFinite(val) ? val : 0;
+      });
+      normalized.y = Math.round(row[this.labelCol]);
+      if (!Number.isFinite(normalized.y)) normalized.y = 0;
+      return normalized;
+    });
+  }
+
+  _orientFeaturesForPlayer(row, playerName, featureList, mean, std) {
+    const p1 = (row.Player_1 || row.player1 || row.player || "").toString().trim();
+    const p2 = (row.Player_2 || row.player2 || "").toString().trim();
+    const isP1 = p1 === playerName;
+    const isP2 = p2 === playerName;
+    if (!isP1 && !isP2) return null;
+    const flip = !isP1 && isP2;
+    const values = featureList.map((f) => {
+      let raw = this._toNumber(row[f]);
+      if (!Number.isFinite(raw)) raw = 0;
+      if (flip && this._flipOnReverse.has(f)) raw = -raw;
+      const mu = mean[f] ?? 0;
+      const sigma = std[f] ?? 1;
+      const norm = sigma === 0 ? 0 : (raw - mu) / sigma;
+      return Number.isFinite(norm) ? norm : 0;
+    });
+    const date = row.date || row.match_date || row.Date || row.rawDate || "";
+    const timestamp = Number.isFinite(row.timestamp) ? row.timestamp : this._parseDate(date);
+    return { values, date, timestamp };
+  }
+
+  _collectPlayerHistory(playerName, featureList, mean, std) {
+    const rows = this.sequenceRowsRaw || this.sequenceRows || [];
+    const history = [];
+    for (const row of rows) {
+      const oriented = this._orientFeaturesForPlayer(row, playerName, featureList, mean, std);
+      if (!oriented) continue;
+      history.push(oriented);
+    }
+    history.sort((a, b) => (a.timestamp || -Infinity) - (b.timestamp || -Infinity));
+    return history;
+  }
+
+  _padSequence(history, seqLen, featureCount) {
+    const padding = Math.max(0, seqLen - history.length);
+    const padded = [];
+    for (let i = 0; i < padding; i++) {
+      padded.push(Array.from({ length: featureCount }, () => 0));
+    }
+    for (const h of history.slice(-seqLen)) {
+      padded.push(h.values.slice());
+    }
+    return padded.slice(-seqLen);
   }
 }

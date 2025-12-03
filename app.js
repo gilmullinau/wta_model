@@ -1,18 +1,57 @@
 // app.js — WTA Match Outcome predictor
 // Loads TensorFlow.js (global tf), dataset from wta_data.csv, trains MLP model, visualizes metrics.
 
-import { DataLoader } from "./data-loader.js";
-import { ModelMLP } from "./gru.js";
+import { DataLoader, GRU_SEQUENCE_FEATURES } from "./data-loader.js";
+import { buildRNNModel } from "./models/rnn-model.js";
 
 const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
+const GRU_SEQ_LEN = 10;
+const FAST_MODE_SEQ_LEN = 6;
+const GRU_FEATURES = GRU_SEQUENCE_FEATURES.flatMap((f) => [`p1_${f}`, `p2_${f}`]);
+const SEQUENCE_MODES = new Set(["RNN"]);
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
-  validationSplit: 0.2,
+  validationSplit: 0.1,
   hiddenUnits: [128, 64],
   dropout: 0.3,
 };
+const DEFAULT_RNN_CONFIG = {
+  units: 16,
+  denseUnits: 32,
+  dropout: 0,
+  learningRate: 0.001,
+  batchSize: 64,
+};
+const FAST_MODE_PRESETS = {
+  units: 8,
+  denseUnits: 16,
+  dropout: 0,
+  learningRate: 0.001,
+  batchSize: 128,
+  epochs: 3,
+  validationSplit: 0.05,
+  seqLen: FAST_MODE_SEQ_LEN,
+};
+let backendInitialized = false;
+
+async function ensureWebGLBackend() {
+  try {
+    await tf.ready();
+    const current = tf.getBackend();
+    if (backendInitialized && current === "webgl") return;
+    if (current !== "webgl") {
+      await tf.setBackend("webgl");
+      await tf.ready();
+      log(`Backend switched to ${tf.getBackend()} for accelerated GRU training.`);
+    }
+    backendInitialized = true;
+  } catch (err) {
+    console.warn("Failed to switch backend", err);
+    log(`Warning: could not switch backend — ${err.message}`);
+  }
+}
 
 let loader = null;
 let model = null;
@@ -21,12 +60,17 @@ let lossChart = null;
 let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
+let gruSequences = null;
+let currentModelType = "RNN";
+let lastCSVText = null;
+let lastRnnConfig = null;
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
   evalBtn: document.getElementById("evalBtn"),
   saveBtn: document.getElementById("saveBtn"),
   loadModelBtn: document.getElementById("loadModelBtn"),
+  downloadDatasetBtn: document.getElementById("downloadDatasetBtn"),
   logs: document.getElementById("logs"),
   info: document.getElementById("info"),
   lossCanvas: document.getElementById("lossChart"),
@@ -41,15 +85,26 @@ const els = {
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
+  gruSummary: document.getElementById("gruSummary"),
+  gruExampleBtn: document.getElementById("gruExampleBtn"),
+  gruExampleTable: document.getElementById("gruExampleTable"),
+  gruExampleMeta: document.getElementById("gruExampleMeta"),
+  gruTensorShapes: document.getElementById("gruTensorShapes"),
+  gruError: document.getElementById("gruError"),
+  rnnUnitsInput: document.getElementById("rnnUnits"),
+  rnnDenseUnitsInput: document.getElementById("rnnDenseUnits"),
+  rnnDropoutInput: document.getElementById("rnnDropout"),
+  rnnLrInput: document.getElementById("rnnLr"),
+  rnnBatchInput: document.getElementById("rnnBatch"),
+  gruPredictSummary: document.getElementById("gruPredictSummary"),
+  gruPredictTable: document.getElementById("gruPredictTable"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
-  batchSizeInput: document.getElementById("batchSizeInput"),
   valSplitInput: document.getElementById("valSplitInput"),
-  layer1Input: document.getElementById("layer1Units"),
-  layer2Input: document.getElementById("layer2Units"),
-  dropoutInput: document.getElementById("dropoutRate"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
+  gruSeqLenInput: document.getElementById("gruSeqLen"),
+  fastModeInput: document.getElementById("fastMode"),
 };
 
 const CATEGORY_FIELDS = [
@@ -69,10 +124,165 @@ function log(msg) {
   els.logs.scrollTop = els.logs.scrollHeight;
 }
 
+function toCsvValue(value) {
+  if (value === null || value === undefined) return "";
+  const str = value.toString();
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function getSelectedModelType() {
+  return "RNN";
+}
+
+function setModeClass(mode) {
+  document.body.classList.remove("mode-mlp", "mode-gru", "mode-rnn");
+  if (mode === "GRU") document.body.classList.add("mode-gru");
+  else if (mode === "RNN") document.body.classList.add("mode-rnn");
+  else document.body.classList.add("mode-mlp");
+}
+
+function applyFastModePreset() {
+  if (!els.fastModeInput?.checked) return;
+  if (els.rnnUnitsInput) els.rnnUnitsInput.value = FAST_MODE_PRESETS.units;
+  if (els.rnnDenseUnitsInput) els.rnnDenseUnitsInput.value = FAST_MODE_PRESETS.denseUnits;
+  if (els.rnnDropoutInput) els.rnnDropoutInput.value = FAST_MODE_PRESETS.dropout;
+  if (els.rnnLrInput) els.rnnLrInput.value = FAST_MODE_PRESETS.learningRate;
+  if (els.rnnBatchInput) els.rnnBatchInput.value = FAST_MODE_PRESETS.batchSize;
+  if (els.epochsInput) els.epochsInput.value = FAST_MODE_PRESETS.epochs;
+  if (els.valSplitInput) els.valSplitInput.value = FAST_MODE_PRESETS.validationSplit;
+  if (els.gruSeqLenInput) els.gruSeqLenInput.value = FAST_MODE_PRESETS.seqLen;
+  log("Fast Mode enabled: applied lightweight GRU presets.");
+  if (loader && lastCSVText) {
+    log("Rebuilding sequences with Fast Mode window (reload in progress)...");
+    parseAndInit(lastCSVText);
+  }
+}
+
+function toggleHyperparamVisibility(mode) {
+  setModeClass(mode);
+  if (els.gruSeqLenInput) els.gruSeqLenInput.disabled = mode !== "RNN";
+  [els.rnnUnitsInput, els.rnnDenseUnitsInput, els.rnnDropoutInput, els.rnnLrInput, els.rnnBatchInput].forEach((el) => {
+    if (el) el.disabled = mode !== "RNN";
+  });
+}
+
+function isSequenceMode(mode = currentModelType) {
+  return SEQUENCE_MODES.has(mode);
+}
+
+function getSelectedSeqLen() {
+  if (els.fastModeInput?.checked) return FAST_MODE_PRESETS.seqLen;
+  const val = parseInt(els.gruSeqLenInput?.value ?? GRU_SEQ_LEN, 10);
+  return Number.isInteger(val) && val > 0 ? val : GRU_SEQ_LEN;
+}
+
 function enableTraining(enabled) {
   els.trainBtn.disabled = !enabled;
   els.evalBtn.disabled = !enabled || !model;
   els.saveBtn.disabled = !enabled || !model;
+}
+
+function resetGruDebug(message = "Sequence inputs not prepared yet.") {
+  gruSequences = null;
+  els.gruSummary.textContent = message;
+  els.gruTensorShapes.textContent = "";
+  els.gruExampleMeta.textContent = "";
+  els.gruExampleTable.innerHTML = "";
+  els.gruError.textContent = "";
+  els.gruExampleBtn.disabled = true;
+}
+
+function resetGruPredictDebug(message = "Sequence prediction debug will appear here in RNN mode.") {
+  if (els.gruPredictSummary) els.gruPredictSummary.textContent = message;
+  if (els.gruPredictTable) els.gruPredictTable.innerHTML = "";
+}
+
+function renderGruSummary(result, expectedFeatureCount = null, mode = currentModelType) {
+  const { stats, meta } = result;
+  const paddingPercent = stats.paddingPercent.toFixed(1);
+  const lines = [
+    `${mode} MODE ENABLED`,
+    "------------------",
+    "SEQUENCE DEBUG",
+    `Sequence Length: ${meta.seqLen}`,
+    `Features per timestep: ${meta.numFeatures}`,
+    `Total sequences: ${stats.numSamples}`,
+    `Sequences with padding: ${paddingPercent}%`,
+    `NaN detected: ${stats.hasNaN ? "YES" : "NO"}`,
+    "Normalization: mean/std applied",
+  ];
+  els.gruSummary.textContent = lines.join("\n");
+  els.gruTensorShapes.textContent = `X shape: [${stats.numSamples}, ${meta.seqLen}, ${meta.numFeatures}]\n` +
+    `y shape: [${stats.numSamples}]\nStatus: OK`;
+  if (expectedFeatureCount && meta.numFeatures < expectedFeatureCount) {
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures}/${expectedFeatureCount} features included in sequences.\nModel will underperform. Check featureList.`;
+  } else if (meta.numFeatures < 15) {
+    els.gruError.textContent = `Warning: Only ${meta.numFeatures} dynamic features provided to the sequence model. This may hurt accuracy.`;
+  } else {
+    els.gruError.textContent = "";
+  }
+  els.gruExampleBtn.disabled = stats.numSamples === 0;
+}
+
+function renderGruExample(index = null) {
+  if (!gruSequences || !gruSequences.X || gruSequences.X.length === 0) return;
+  let resolvedIdx = index;
+  if (resolvedIdx === null) {
+    const sampleInfo = gruSequences.meta.sampleInfo || [];
+    const sabalenkaIdx = sampleInfo
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => (s?.player || "").toLowerCase().includes("sabalenka"))
+      .map(({ i }) => i)
+      .pop();
+    resolvedIdx = sabalenkaIdx !== undefined ? sabalenkaIdx : gruSequences.X.length - 1;
+  }
+  const boundedIdx = Math.max(0, Math.min(resolvedIdx, gruSequences.X.length - 1));
+  const seq = gruSequences.X[boundedIdx];
+  const info = (gruSequences.meta.sampleInfo || [])[boundedIdx] || {};
+  const headers = ["Timestep", ...(gruSequences.meta.featureList || GRU_FEATURES)];
+  const reversedSeq = [...seq].reverse();
+  const rows = reversedSeq.map((values, i) => {
+    const timestep = seq.length - i;
+    const cells = [`<td>${timestep}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+    return `<tr>${cells.join("")}</tr>`;
+  });
+  const headerCells = headers.map((h) => `<th>${h}</th>`);
+  els.gruExampleTable.innerHTML = `<thead><tr>${headerCells.join("")}</tr></thead><tbody>${rows.join("")}</tbody>`;
+  const date = info.date || "n/a";
+  const p1 = info.player1 || info.player || "Unknown";
+  const p2 = info.player2 || "Unknown";
+  els.gruExampleMeta.textContent = `Target y = ${info.label ?? "?"} | Match date = ${date} | Players: ${p1} vs ${p2}`;
+}
+
+function renderGruPredictDebug(sequence, featureList, meta) {
+  if (!els.gruPredictSummary || !els.gruPredictTable) return;
+  const lines = [
+    "SEQUENCE PREDICTION DEBUG",
+    `Input shape: [1, ${loader.seqLen}, ${featureList.length}]`,
+    `Players: ${meta.player1 || "n/a"} vs ${meta.player2 || "n/a"}`,
+    `Latest date: ${meta.latestDate || "n/a"}`,
+    `Padding: ${meta.padded ? "YES" : "NO"} | Matches used: ${meta.usedRows}`,
+  ];
+  els.gruPredictSummary.textContent = lines.join("\n");
+  const headers = ["Timestep", ...featureList];
+  const reversedSeq = [...sequence].reverse();
+  const rows = reversedSeq.map((values, i) => {
+    const timestep = sequence.length - i;
+    const cells = [`<td>${timestep}</td>`, ...values.map((v) => `<td>${Number(v).toFixed(4)}</td>`)];
+    return `<tr>${cells.join("")}</tr>`;
+  });
+  const headerCells = headers.map((h) => `<th>${h}</th>`).join("");
+  els.gruPredictTable.innerHTML = `<thead><tr>${headerCells}</tr></thead><tbody>${rows.join("")}</tbody>`;
+}
+
+function renderGruError(message) {
+  els.gruError.textContent = `SEQUENCE BUILDER ERROR:\n${message}`;
+  els.gruSummary.textContent = "SEQUENCE DEBUG\n------------------\nSequence builder failed.";
+  els.gruTensorShapes.textContent = "";
+  els.gruExampleBtn.disabled = true;
 }
 
 function showPredictPanel(show) {
@@ -84,8 +294,41 @@ function showPredictPanel(show) {
   }
 }
 
+function updateCleanDownloadState() {
+  if (!els.downloadDatasetBtn) return;
+  const hasClean = loader && typeof loader.getCleanedRows === "function" && loader.getCleanedRows().length > 0;
+  els.downloadDatasetBtn.disabled = !hasClean;
+}
+
+function downloadCleanDataset() {
+  if (!loader || !els.downloadDatasetBtn) {
+    log("No dataset loader available for export.");
+    return;
+  }
+  const rows = loader.getCleanedRows();
+  if (!rows || rows.length === 0) {
+    log("No cleaned dataset available to export.");
+    return;
+  }
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.join(",")];
+  rows.forEach((r) => {
+    const line = headers.map((h) => toCsvValue(r[h])).join(",");
+    lines.push(line);
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "feature_engineered_v2.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`Clean dataset exported (${rows.length} rows, ${headers.length} columns) without legacy surface win-rate fields.`);
+}
+
 async function parseAndInit(text) {
   try {
+    await ensureWebGLBackend();
     disposeDataset();
     if (model) {
       model.dispose();
@@ -93,19 +336,35 @@ async function parseAndInit(text) {
     }
     if (lossChart) { lossChart.destroy(); lossChart = null; }
     if (cmChart) { cmChart.destroy(); cmChart = null; }
-    loader = new DataLoader();
+    resetGruDebug();
+    resetGruPredictDebug();
+    currentModelType = "RNN";
+    toggleHyperparamVisibility(currentModelType);
+    const seqLen = getSelectedSeqLen();
+    loader = new DataLoader(currentModelType, seqLen);
     dataset = await loader.loadCSVText(text);
-    els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
-    log("Dataset loaded successfully.");
-    enableTraining(true);
+    lastCSVText = text;
+    const trainCount = dataset.X_train.shape[0];
+    const testCount = dataset.X_test.shape[0];
+    const featureCount = dataset.featureNames.length;
+  const modeLine = `Mode: ${currentModelType}` + (isSequenceMode(currentModelType) ? ` | SeqLen: ${seqLen}` : "");
+    els.info.textContent = `Dataset loaded — ${modeLine} | Train: ${trainCount}, Test: ${testCount}, Features: ${featureCount}`;
+    log(`${currentModelType} MODE ENABLED | SeqLen ${seqLen} | Features per timestep: ${featureCount} | Normalization: mean/std applied`);
+    if (featureCount < 15) {
+      log(`Warning: Only ${featureCount} dynamic features provided to ${currentModelType}. This may hurt accuracy.`);
+    }
+    const ok = prepareGruSequences();
+    enableTraining(ok);
     buildPredictForm();
     els.saveBtn.disabled = true;
+    updateCleanDownloadState();
     showPredictPanel(false);
   } catch (err) {
     console.error(err);
     els.info.textContent = `Dataset error: ${err.message}`;
     log(`Dataset error: ${err.message}`);
     enableTraining(false);
+    updateCleanDownloadState();
   }
 }
 
@@ -127,6 +386,28 @@ async function autoLoadCSV() {
     console.error("❌ Auto-load failed:", err);
     log(`Auto-load failed: ${err.message}`);
     els.info.textContent = "Failed to auto-load wta_data.csv from project root. Use manual upload below.";
+  }
+}
+
+function prepareGruSequences() {
+  if (!loader) {
+    resetGruDebug("Load a dataset to build sequence inputs.");
+    return false;
+  }
+  try {
+    const result = loader.getSequenceDebug();
+    if (!result || !result.X || result.X.length === 0) {
+      resetGruDebug("No rows available for sequence builder.");
+      return false;
+    }
+    gruSequences = result;
+    const expectedCount = result.meta ? result.meta.numFeatures : null;
+    renderGruSummary(result, expectedCount, currentModelType);
+    return true;
+  } catch (err) {
+    renderGruError(err.message);
+    log(`Sequence builder error: ${err.message}`);
+    return false;
   }
 }
 
@@ -186,7 +467,7 @@ function buildCategoryControls() {
     ];
     el.innerHTML = optionHtml.join("");
     el.value = "";
-    el.disabled = true;
+    el.disabled = false;
   });
 }
 
@@ -194,7 +475,7 @@ function resetCategoryControls() {
   CATEGORY_FIELDS.forEach(({ el }) => {
     if (!el) return;
     el.value = "";
-    el.disabled = true;
+    el.disabled = !loader;
   });
 }
 
@@ -275,6 +556,10 @@ function handlePlayer1Change() {
   }
 
   const { opponents, preserved } = populatePlayer2Options(player1);
+  if (isSequenceMode()) {
+    els.predictBtn.disabled = false;
+    els.matchSummary.textContent = `${currentModelType} inference will use ${player1}'s last ${loader.seqLen} matches (padded if needed).`;
+  }
   if (opponents.length === 0) {
     resetAutoPredictPanel(`No recorded opponents for ${player1} in the dataset.`);
     return;
@@ -291,6 +576,17 @@ function updateAutoPreview() {
   if (!loader) return;
   const player1 = els.player1Select.value;
   const player2 = els.player2Select.value;
+  if (isSequenceMode()) {
+    if (!player1) {
+      resetAutoPredictPanel(`Select a player to build a ${SCENARIO_YEAR} sequence.`);
+      return;
+    }
+    els.matchSummary.textContent = `${currentModelType} will use ${player1}'s last ${loader.seqLen} matches (padded if too short).`;
+    els.predictBtn.disabled = !model;
+    els.featureTableBody.innerHTML = "";
+    resetGruPredictDebug("Select a player to inspect the sequence input.");
+    return;
+  }
   if (!player1) {
     setPlayer2Placeholder("Select Player 1 first…");
     resetAutoPredictPanel(`Select two players to build a ${SCENARIO_YEAR} matchup from the dataset.`);
@@ -446,24 +742,69 @@ function isFiniteNumber(value) {
 
 async function trainModel() {
   if (!dataset) return alert("Dataset not loaded yet.");
-  if (model) model.dispose();
-  const hyper = readHyperparameters();
-  model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
-  model.build();
-  log("Training started...");
+  if (model) {
+    model.dispose();
+  }
+  try {
+    await tf.ready();
+    await ensureWebGLBackend();
+    if (typeof tf.getBackend === "function") {
+      console.log("TensorFlow backend:", tf.getBackend());
+    }
+  } catch (err) {
+    console.error("TensorFlow not ready", err);
+    alert("TensorFlow.js failed to initialize. Check network and reload page.");
+    return;
+  }
+  try {
+    // Avoid resetting the TensorFlow engine in-browser because it can tear down
+    // the active backend and lead to undefined backend errors during
+    // sequence training. Model tensors are disposed explicitly elsewhere.
+  } catch (err) {
+    console.warn("TensorFlow readiness check failed", err);
+  }
+  const mode = currentModelType;
+  log(`Training started in ${mode} mode...`);
   const losses = [], valAcc = [];
   enableTraining(false);
   try {
-    await model.train(dataset.X_train, dataset.y_train, {
+    const hyper = readRnnHyperparameters();
+    lastRnnConfig = hyper;
+    log(`Backend: ${tf.getBackend()} | epochs=${hyper.training.epochs} | batch=${hyper.training.batchSize}`);
+    const tensorsAreValid = dataset.X_train instanceof tf.Tensor && dataset.y_train instanceof tf.Tensor;
+    const testTensorsValid = dataset.X_test instanceof tf.Tensor && dataset.y_test instanceof tf.Tensor;
+    console.log("RNN tensor check:", tensorsAreValid, testTensorsValid);
+    console.log("Train tensors:", dataset.X_train?.shape, dataset.y_train?.shape);
+    log(`RNN tensors ready — X: [${dataset.X_train?.shape?.join(" x ")}] | y: [${dataset.y_train?.shape?.join(" x ")}]`);
+    if (!tensorsAreValid || !testTensorsValid) {
+      log("RNN ERROR: X_train or y_train is not a tensor. Sequence-builder is returning plain arrays instead of tf.tensor3d.");
+      throw new Error("Invalid RNN input tensors");
+    }
+    const seqLen = loader.seqLen;
+    model = buildRNNModel([seqLen, dataset.featureNames.length], {
+      units: hyper.architecture.units,
+      denseUnits: hyper.architecture.denseUnits,
+      dropout: hyper.architecture.dropout,
+      learningRate: hyper.architecture.learningRate,
+    });
+    await model.fit(dataset.X_train, dataset.y_train, {
       epochs: hyper.training.epochs,
       batchSize: hyper.training.batchSize,
-      validationSplit: hyper.training.validationSplit,
-      onEpochEnd: (epoch, logs) => {
-        const val = logs.val_acc ?? logs.val_accuracy ?? 0;
-        log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
-        losses.push(Number(logs.loss));
-        valAcc.push(Number(val));
-        drawLossChart(losses, valAcc);
+      validationSplit: hyper.validationSplit,
+      // TODO: consider pre-slicing validationData to avoid in-fit array splits when profiling performance further.
+      callbacks: {
+        onEpochEnd: (epoch, logs) => {
+          const val = logs.val_acc ?? logs.val_accuracy ?? 0;
+          const acc = Number(logs.acc ?? logs.accuracy ?? 0);
+          const accPct = (acc * 100).toFixed(1);
+          const valPct = (Number(val) * 100).toFixed(1);
+          log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} acc=${accPct}% val_acc=${valPct}%`);
+          losses.push(Number(logs.loss));
+          valAcc.push(Number(val));
+          if ((epoch + 1) % 3 === 0 || epoch + 1 === hyper.training.epochs) {
+            drawLossChart(losses, valAcc);
+          }
+        }
       }
     });
 
@@ -479,29 +820,114 @@ async function trainModel() {
   }
 }
 
+async function confusionMatrixFromModel(modelInstance, X, y) {
+  const probsTensor = modelInstance.predict(X);
+  const probsData = await probsTensor.data();
+  probsTensor.dispose?.();
+  const yTrue = Array.from(await y.data());
+  let tp = 0, tn = 0, fp = 0, fn = 0;
+  for (let i = 0; i < yTrue.length; i++) {
+    const pred = probsData[i] >= 0.5 ? 1 : 0;
+    const truth = Math.round(yTrue[i]);
+    if (pred === 1 && truth === 1) tp++;
+    else if (pred === 0 && truth === 0) tn++;
+    else if (pred === 1 && truth === 0) fp++;
+    else fn++;
+  }
+  return { tp, tn, fp, fn };
+}
+
 async function evaluateModel() {
   if (!dataset || !model) return alert("Train the model first.");
   log("Evaluating on test set...");
-  const { loss, acc } = await model.evaluate(dataset.X_test, dataset.y_test);
+  const evalOut = await model.evaluate(dataset.X_test, dataset.y_test, { batchSize: 256 });
+  const [lossTensor, accTensor] = Array.isArray(evalOut) ? evalOut : [evalOut];
+  const loss = (await lossTensor.data())[0];
+  const acc = accTensor ? (await accTensor.data())[0] : 0;
+  lossTensor.dispose();
+  accTensor?.dispose();
   log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
-  const cm = await model.confusionMatrix(dataset.X_test, dataset.y_test);
+  const cm = await confusionMatrixFromModel(model, dataset.X_test, dataset.y_test);
   drawConfusionMatrix(cm);
+}
+
+async function saveCurrentModel() {
+  if (!model) return alert("Train a model before saving.");
+  try {
+    const key = "tennis_model_rnn";
+    await model.save(`localstorage://${key}`);
+    const meta = {
+      modelType: "RNN",
+      seqLen: loader?.seqLen ?? getSelectedSeqLen(),
+      featureList: loader?.meta?.featureList || dataset?.featureNames || [],
+      baseFeatureList: loader?.meta?.baseFeatureList || [],
+      featureIndexMap: loader?.meta?.featureIndexMap || {},
+      mean: loader?.meta?.mean || {},
+      std: loader?.meta?.std || {},
+      config: lastRnnConfig?.architecture || DEFAULT_RNN_CONFIG,
+    };
+    localStorage.setItem(`${key}_meta`, JSON.stringify(meta));
+    localStorage.setItem("metadata_rnn.json", JSON.stringify(meta));
+    log("RNN model saved to browser storage.");
+  } catch (err) {
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+async function loadCurrentModel() {
+  try {
+    const key = "tennis_model_rnn";
+    model = await tf.loadLayersModel(`localstorage://${key}`);
+      const rawMeta = localStorage.getItem(`${key}_meta`) || localStorage.getItem("metadata_rnn.json");
+      if (rawMeta) {
+        try {
+          const meta = JSON.parse(rawMeta);
+          if (loader) {
+            if (meta?.seqLen) loader.seqLen = meta.seqLen;
+            loader.meta = meta || loader.meta;
+            if (!loader.meta.baseFeatureList && Array.isArray(meta?.featureList)) {
+              loader.meta.baseFeatureList = (meta.baseFeatureList && meta.baseFeatureList.length)
+                ? meta.baseFeatureList
+                : meta.featureList.slice(0, meta.featureList.length / 2).map((f) => f.replace(/^p[12]_/, ""));
+            }
+          }
+          log(`Restored RNN metadata: seqLen=${meta?.seqLen || "?"}, features=${meta?.featureList?.length || "?"}`);
+        } catch (err) {
+          console.warn("Failed to parse RNN metadata", err);
+        }
+      }
+    log("RNN model loaded from browser storage.");
+    showPredictPanel(true);
+    enableTraining(Boolean(dataset));
+    if (!dataset || !loader) {
+      log("Load a dataset to enable predictions with the restored model.");
+    }
+  } catch (err) {
+    alert(`No saved model found or load failed: ${err.message}`);
+  }
 }
 
 function drawLossChart(losses, valAcc) {
   const ctx = els.lossCanvas.getContext("2d");
-  if (lossChart) lossChart.destroy();
-  lossChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: losses.map((_, i) => `E${i + 1}`),
-      datasets: [
-        { label: "Loss", data: losses, borderColor: "#6aa8ff", tension: 0.2 },
-        { label: "Val Accuracy", data: valAcc, borderColor: "#50fa7b", tension: 0.2 }
-      ]
-    },
-    options: { responsive: true, maintainAspectRatio: false }
-  });
+  const labels = losses.map((_, i) => `E${i + 1}`);
+  if (!lossChart) {
+    lossChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "Loss", data: losses.slice(), borderColor: "#6aa8ff", tension: 0.2 },
+          { label: "Val Accuracy", data: valAcc.slice(), borderColor: "#50fa7b", tension: 0.2 }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  } else {
+    lossChart.data.labels = labels;
+    lossChart.data.datasets[0].data = losses.slice();
+    lossChart.data.datasets[1].data = valAcc.slice();
+    lossChart.update("none");
+  }
 }
 
 function drawConfusionMatrix({ tp, tn, fp, fn }) {
@@ -528,48 +954,88 @@ function drawConfusionMatrix({ tp, tn, fp, fn }) {
 async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
-  if (!currentAutoVector) {
-    alert("Select two players with available matchup data first.");
-    return;
-  }
   try {
-    const vec = loader.vectorizeForPredict(currentAutoVector);
-    const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
-    const yProb = model.predictProba(x);
-    const prob = (await yProb.data())[0];
-    const pred = prob >= 0.5 ? 1 : 0;
-    const player1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const player2 = currentAutoPayload?.players?.player2 || "Player 2";
-    const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
-    els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
-    x.dispose(); yProb.dispose();
+    const player1 = els.player1Select.value;
+    const player2 = els.player2Select.value;
+    if (!player1 || !player2) throw new Error("Select both Player 1 and Player 2 to build a sequence.");
+    const sym = await symmetricPredict(player1, player2, loader.seqLen);
+    const prob = sym.symmetricProb;
+    const outcome = prob >= 0.5 ? `${player1} is favored` : `${player2} is favored`;
+    els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | Symmetric check → forward=${sym.forwardProb.toFixed(3)}, reverse_complement=${(1 - sym.reverseProb).toFixed(3)}`;
+    log(`Symmetric predict → P(${player1} beats ${player2})=${prob.toFixed(3)} | forward=${sym.forwardProb.toFixed(3)} | reverse complement=${(1 - sym.reverseProb).toFixed(3)}`);
+    renderGruPredictDebug(sym.forward.sequence, sym.forward.featureList, sym.forward.meta);
+    sym.cleanup();
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
     alert(err.message);
   }
 }
 
+function mirrorSequenceForPlayers(sequence) {
+  if (!Array.isArray(sequence) || sequence.length === 0) {
+    throw new Error("Cannot mirror an empty sequence");
+  }
+  const stepSize = sequence[0].length;
+  if (stepSize % 2 !== 0) throw new Error("Sequence step length must be even to mirror player halves");
+  const half = stepSize / 2;
+  return sequence.map((step) => {
+    const p1 = step.slice(0, half);
+    const p2 = step.slice(half);
+    return p2.concat(p1);
+  });
+}
+
+async function symmetricPredict(player1, player2, seqLen) {
+  const forward = loader.buildSequenceInputForMatch(player1, player2, seqLen);
+
+  if (!forward.sequence || forward.sequence.length === 0) {
+    throw new Error("No history available to build symmetric sequences for prediction.");
+  }
+
+  const mirroredSeq = mirrorSequenceForPlayers(forward.sequence);
+  const reverseTensor = tf.tensor3d([mirroredSeq], [1, seqLen, forward.featureList.length], "float32");
+  const reverse = {
+    tensor: reverseTensor,
+    sequence: mirroredSeq,
+    featureList: forward.featureList.slice(),
+    meta: {
+      player1: player2,
+      player2: player1,
+      latestDate: forward.meta.latestDate,
+      padded: forward.meta.padded,
+      usedRows: forward.meta.usedRows,
+      mirrored: true,
+    },
+  };
+
+  const batch = tf.concat([forward.tensor, reverse.tensor], 0);
+  const preds = model.predict(batch);
+  const data = await preds.data();
+  const forwardProb = data[0];
+  const reverseProb = data[1];
+  preds.dispose();
+  batch.dispose();
+
+  const symmetricProb = (forwardProb + (1 - reverseProb)) / 2;
+
+  return {
+    symmetricProb,
+    forwardProb,
+    reverseProb,
+    forward,
+    reverse,
+    cleanup: () => {
+      forward.tensor.dispose();
+      reverse.tensor.dispose();
+    }
+  };
+}
+
 // Buttons
 els.trainBtn.addEventListener("click", trainModel);
 els.evalBtn.addEventListener("click", evaluateModel);
-els.saveBtn.addEventListener("click", async () => {
-  if (model) { await model.save(); log("Model saved to browser storage."); }
-});
-els.loadModelBtn.addEventListener("click", async () => {
-  try {
-    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
-    await m.load();
-    model = m;
-    log("Model loaded from browser storage.");
-    showPredictPanel(true);
-    enableTraining(Boolean(dataset));
-    if (!dataset || !loader) {
-      log("Load a dataset to enable predictions with the restored model.");
-    }
-  } catch {
-    alert("No saved model found or load failed.");
-  }
-});
+els.saveBtn.addEventListener("click", saveCurrentModel);
+els.loadModelBtn.addEventListener("click", loadCurrentModel);
 CATEGORY_FIELDS.forEach(({ key, el }) => {
   if (!el) return;
   el.addEventListener("change", () => handleCategorySelectChange(key));
@@ -578,30 +1044,64 @@ els.player1Select.addEventListener("change", handlePlayer1Change);
 els.player2Select.addEventListener("change", updateAutoPreview);
 els.predictBtn.addEventListener("click", handlePredict);
 els.loadFileBtn.addEventListener("click", handleManualFileLoad);
+if (els.downloadDatasetBtn) {
+  els.downloadDatasetBtn.addEventListener("click", downloadCleanDataset);
+}
 els.clearLogsBtn.addEventListener("click", () => {
   els.logs.textContent = "";
 });
+els.gruExampleBtn.addEventListener("click", () => renderGruExample());
+if (els.fastModeInput) {
+  els.fastModeInput.addEventListener("change", () => {
+    applyFastModePreset();
+  });
+}
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
 enableTraining(false);
 buildCategoryControls();
 showPredictPanel(false);
+resetGruDebug();
+resetGruPredictDebug();
+toggleHyperparamVisibility(currentModelType);
+applyFastModePreset();
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
-function readHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+function readRnnHyperparameters() {
+  const fastMode = Boolean(els.fastModeInput?.checked);
+  if (fastMode) {
+    return {
+      training: { epochs: FAST_MODE_PRESETS.epochs, batchSize: FAST_MODE_PRESETS.batchSize, rawBatch: FAST_MODE_PRESETS.batchSize },
+      architecture: {
+        units: FAST_MODE_PRESETS.units,
+        denseUnits: FAST_MODE_PRESETS.denseUnits,
+        dropout: FAST_MODE_PRESETS.dropout,
+        learningRate: FAST_MODE_PRESETS.learningRate,
+      },
+      validationSplit: FAST_MODE_PRESETS.validationSplit,
+    };
+  }
+
+  const epochs = clampInt(els.epochsInput.value, 1, 200, 3);
+  const rawBatch = Number.parseInt(els.rnnBatchInput?.value ?? DEFAULT_RNN_CONFIG.batchSize, 10);
+  const batchSize = clampInt(rawBatch, 8, 128, DEFAULT_RNN_CONFIG.batchSize);
+  const units = clampInt(els.rnnUnitsInput?.value, 4, 64, DEFAULT_RNN_CONFIG.units);
+  const denseUnits = clampInt(els.rnnDenseUnitsInput?.value, 4, 128, DEFAULT_RNN_CONFIG.denseUnits);
+  const rawDropout = Number.parseFloat(els.rnnDropoutInput?.value ?? DEFAULT_RNN_CONFIG.dropout);
+  const dropout = Number.isFinite(rawDropout) ? Math.min(Math.max(rawDropout, 0), 0.8) : DEFAULT_RNN_CONFIG.dropout;
+  const lr = Number.parseFloat(els.rnnLrInput?.value ?? DEFAULT_RNN_CONFIG.learningRate);
+  const learningRate = Number.isFinite(lr) && lr > 0 ? lr : DEFAULT_RNN_CONFIG.learningRate;
+  const valSplitRaw = Number.parseFloat(els.valSplitInput?.value ?? DEFAULT_HYPERPARAMS.validationSplit);
+  const validationSplit = Number.isFinite(valSplitRaw) ? Math.min(Math.max(valSplitRaw, 0.05), 0.5) : DEFAULT_HYPERPARAMS.validationSplit;
+  if (units > 64 || denseUnits > 128 || batchSize > 128) {
+    throw new Error("Too heavy configuration — running in browser. Reduce units or batch size.");
+  }
   return {
-    training: {
-      epochs,
-      batchSize: DEFAULT_HYPERPARAMS.batchSize,
-      validationSplit: DEFAULT_HYPERPARAMS.validationSplit,
-    },
-    architecture: {
-      hiddenUnits: DEFAULT_HYPERPARAMS.hiddenUnits.slice(),
-      dropout: DEFAULT_HYPERPARAMS.dropout,
-    }
+    training: { epochs, batchSize, rawBatch },
+    architecture: { units, denseUnits, dropout, learningRate },
+    validationSplit,
   };
 }
 
