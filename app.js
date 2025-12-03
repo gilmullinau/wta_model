@@ -958,20 +958,48 @@ async function handlePredict(e) {
     const player1 = els.player1Select.value;
     const player2 = els.player2Select.value;
     if (!player1 || !player2) throw new Error("Select both Player 1 and Player 2 to build a sequence.");
-    const { tensor, sequence, featureList, meta } = loader.buildSequenceInputForMatch(player1, player2, loader.seqLen);
-    if (!sequence || sequence.length === 0) throw new Error("No history available to build a sequence.");
-    const pred = model.predict(tensor);
-    const data = await pred.data();
-    const prob = data[0];
-    pred.dispose();
+    const sym = await symmetricPredict(player1, player2, loader.seqLen);
+    const prob = sym.symmetricProb;
     const outcome = prob >= 0.5 ? `${player1} is favored` : `${player2} is favored`;
-    els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | History up to ${meta.latestDate || "n/a"}`;
-    renderGruPredictDebug(sequence, featureList, meta);
-    tensor.dispose();
+    els.predictOut.textContent = `Win probability: ${prob.toFixed(3)} (${outcome}) | Symmetric check → forward=${sym.forwardProb.toFixed(3)}, reverse_complement=${(1 - sym.reverseProb).toFixed(3)}`;
+    log(`Symmetric predict → P(${player1} beats ${player2})=${prob.toFixed(3)} | forward=${sym.forwardProb.toFixed(3)} | reverse complement=${(1 - sym.reverseProb).toFixed(3)}`);
+    renderGruPredictDebug(sym.forward.sequence, sym.forward.featureList, sym.forward.meta);
+    sym.cleanup();
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
     alert(err.message);
   }
+}
+
+async function symmetricPredict(player1, player2, seqLen) {
+  const forward = loader.buildSequenceInputForMatch(player1, player2, seqLen);
+  const reverse = loader.buildSequenceInputForMatch(player2, player1, seqLen);
+
+  if (!forward.sequence || forward.sequence.length === 0 || !reverse.sequence || reverse.sequence.length === 0) {
+    throw new Error("No history available to build symmetric sequences for prediction.");
+  }
+
+  const batch = tf.concat([forward.tensor, reverse.tensor], 0);
+  const preds = model.predict(batch);
+  const data = await preds.data();
+  const forwardProb = data[0];
+  const reverseProb = data[1];
+  preds.dispose();
+  batch.dispose();
+
+  const symmetricProb = (forwardProb + (1 - reverseProb)) / 2;
+
+  return {
+    symmetricProb,
+    forwardProb,
+    reverseProb,
+    forward,
+    reverse,
+    cleanup: () => {
+      forward.tensor.dispose();
+      reverse.tensor.dispose();
+    }
+  };
 }
 
 // Buttons
