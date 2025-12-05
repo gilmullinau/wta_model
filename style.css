@@ -209,6 +209,38 @@ label {
   padding: 6px 4px;
 }
 
+.player-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.player-card {
+  background: #0b0f1f;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-height: 180px;
+}
+
+.player-card .card-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.player-card .stat-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.player-card .stat-line:last-child {
+  border-bottom: none;
+}
+
 #predictPanel {
   display: none;
 }

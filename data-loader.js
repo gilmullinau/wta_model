@@ -3,12 +3,28 @@
 // stratified split train/test, returns tf.Tensors and feature metadata.
 const tf = window.tf;
 const SCENARIO_YEAR = 2025;
+const AGE_GROUPS = [
+  { label: "lt20", min: -Infinity, max: 20 },
+  { label: "20_24", min: 20, max: 25 },
+  { label: "25_29", min: 25, max: 30 },
+  { label: "30_34", min: 30, max: 35 },
+  { label: "35_plus", min: 35, max: Infinity },
+];
 
 export class DataLoader {
   constructor() {
     this.numericCols = [
-      "rank_diff", "pts_diff", "odd_diff",
-      "h2h_advantage", "last_winner", "surface_winrate_adv", "year"
+      // Static differentials
+      "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "last_winner", "surface_winrate_adv",
+      // Age
+      "age_1", "age_2",
+      // Form / streaks
+      "streak_1", "streak_2", "streak_value_1", "streak_value_2",
+      "recent_win_rate_5_1", "recent_win_rate_5_2", "recent_win_rate_10_1", "recent_win_rate_10_2",
+      // Fatigue
+      "fatigue_7d_1", "fatigue_7d_2", "fatigue_14d_1", "fatigue_14d_2", "fatigue_30d_1", "fatigue_30d_2",
+      // Surface
+      "surface_trend_1", "surface_trend_2",
     ];
     this.categoricalCols = ["Surface", "Court", "Round"];
     this.dropCols = [
@@ -19,15 +35,29 @@ export class DataLoader {
     this.catLevels = {};
     this.scaler = { mean: {}, std: {} };
     this.featureNames = [];
+    this.featureIndexMap = {};
     this.matchRecords = [];
     this.playerNames = [];
     this.matchIndex = new Map();
     this.opponentMap = new Map();
     this.playerStats = new Map();
     this.categoryOptions = new Map();
+    this.ageMap = new Map();
+    this.ageGroupLevels = AGE_GROUPS.map((g) => g.label);
     this._flipOnReverse = new Set([
       "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "surface_winrate_adv"
     ]);
+    this.playerFeaturePairs = [
+      ["age_1", "age_2"],
+      ["streak_1", "streak_2"],
+      ["streak_value_1", "streak_value_2"],
+      ["recent_win_rate_5_1", "recent_win_rate_5_2"],
+      ["recent_win_rate_10_1", "recent_win_rate_10_2"],
+      ["fatigue_7d_1", "fatigue_7d_2"],
+      ["fatigue_14d_1", "fatigue_14d_2"],
+      ["fatigue_30d_1", "fatigue_30d_2"],
+      ["surface_trend_1", "surface_trend_2"],
+    ];
   }
 
   async loadCSVText(csvText) {
@@ -36,6 +66,8 @@ export class DataLoader {
     if (rows.length === 0) throw new Error("Empty CSV file.");
     const headers = rows[0].map(h => (h ?? "").trim());
     const dataRows = rows.slice(1);
+
+    await this._ensureAgesLoaded();
 
     const raw = dataRows.map((r) => {
       const obj = {};
@@ -49,11 +81,14 @@ export class DataLoader {
 
     const missingNumeric = this.numericCols.filter((c) => !headers.includes(c));
     const missingCategorical = this.categoricalCols.filter((c) => !headers.includes(c));
-    if (missingNumeric.length > 0 || missingCategorical.length > 0) {
+    if (missingCategorical.length > 0) {
       const missing = [];
       if (missingNumeric.length > 0) missing.push(`numeric: ${missingNumeric.join(", ")}`);
       if (missingCategorical.length > 0) missing.push(`categorical: ${missingCategorical.join(", ")}`);
       throw new Error(`Missing expected columns — ${missing.join("; ")}`);
+    }
+    if (missingNumeric.length > 0) {
+      console.warn("Missing numeric columns in CSV, will impute medians:", missingNumeric.join(", "));
     }
 
     const metaRows = raw.map((row) => ({
@@ -72,7 +107,9 @@ export class DataLoader {
       pts1: this._toNumber(row["Pts_1"]),
       pts2: this._toNumber(row["Pts_2"]),
       winner: (row["Winner"] ?? "").toString().trim(),
-      score: (row["Score"] ?? "").toString().trim()
+      score: (row["Score"] ?? "").toString().trim(),
+      ageGroups: {},
+      playerFeatures: {},
     }));
 
     // Drop leakage columns; cast types and enrich metadata snapshot
@@ -82,8 +119,8 @@ export class DataLoader {
       meta.label = row[this.labelCol];
       for (const c of this.numericCols) {
         const num = this._toNumber(row[c]);
-        row[c] = num;
-        meta.numeric[c] = num;
+        row[c] = this._sanitizeNumeric(c, num);
+        meta.numeric[c] = row[c];
       }
       for (const col of this.categoricalCols) {
         const str = (row[col] ?? "").toString().trim();
@@ -95,13 +132,32 @@ export class DataLoader {
       }
     });
 
+    const medians = this._computeMedians(raw);
+    const ageFallback = Number.isFinite(medians.age_1)
+      ? medians.age_1
+      : (Number.isFinite(medians.age_2) ? medians.age_2 : 27);
+
+    raw.forEach((row, idx) => {
+      const meta = metaRows[idx];
+      for (const c of this.numericCols) {
+        if (!Number.isFinite(row[c])) {
+          const fallback = Number.isFinite(medians[c]) ? medians[c] : 0;
+          row[c] = c.startsWith("age_") ? ageFallback : fallback;
+        }
+        meta.numeric[c] = row[c];
+      }
+      this._normalizeSurfaceTrend(row, meta);
+      const ageGroup = this._resolveAgeGroups(meta.player1, meta.player2, row, meta.date);
+      row.age_group_1 = ageGroup.age_group_1;
+      row.age_group_2 = ageGroup.age_group_2;
+      meta.ageGroups = ageGroup;
+      meta.playerFeatures = this._buildPlayerFeatureView(row, meta);
+    });
+
     const filtered = [];
     const filteredMeta = [];
     raw.forEach((row, idx) => {
       if (!Number.isFinite(row[this.labelCol])) return;
-      for (const c of this.numericCols) {
-        if (!Number.isFinite(row[c])) return;
-      }
       filtered.push(row);
       filteredMeta.push(metaRows[idx]);
     });
@@ -115,6 +171,7 @@ export class DataLoader {
     this._fitCategoricals(trainRows);
     const { X: X_train_raw, y: y_train, featureNames } = this._buildDesignMatrix(trainRows);
     this.featureNames = featureNames;
+    this.featureIndexMap = this.featureNames.reduce((acc, f, i) => { acc[f] = i; return acc; }, {});
     this._fitScaler(X_train_raw, featureNames);
 
     const X_train_scaled = this._transformWithScaler(X_train_raw, featureNames);
@@ -131,12 +188,15 @@ export class DataLoader {
       X_train: xTrainTensor, y_train: yTrainTensor,
       X_test: xTestTensor, y_test: yTestTensor,
       featureNames: this.featureNames,
+      featureIndexMap: this.featureIndexMap,
       artifacts: {
         catLevels: this.catLevels,
         scaler: this.scaler,
         numericCols: this.numericCols,
         categoricalCols: this.categoricalCols,
-        featureNames: this.featureNames
+        featureNames: this.featureNames,
+        featureIndexMap: this.featureIndexMap,
+        ageGroupLevels: this.ageGroupLevels,
       }
     };
   }
@@ -177,11 +237,18 @@ export class DataLoader {
 
   vectorizeForPredict(userInput) {
     const rowObj = {};
+    const age1 = this._sanitizeNumeric("age_1", this._toNumber(userInput.age_1));
+    const age2 = this._sanitizeNumeric("age_2", this._toNumber(userInput.age_2));
+    const ageGroup = this._computeAgeGroups(age1, age2);
     for (const c of this.numericCols) {
-      const v = this._toNumber(userInput[c]);
+      const v = this._sanitizeNumeric(c, this._toNumber(userInput[c]));
       if (!Number.isFinite(v)) throw new Error(`Numeric input "${c}" missing or invalid.`);
       rowObj[c] = v;
     }
+    rowObj.age_1 = Number.isFinite(age1) ? age1 : 0;
+    rowObj.age_2 = Number.isFinite(age2) ? age2 : 0;
+    rowObj.age_group_1 = ageGroup.age_group_1;
+    rowObj.age_group_2 = ageGroup.age_group_2;
     for (const col of this.categoricalCols) {
       const levels = this.catLevels[col] || [];
       const provided = (userInput[col] ?? "").toString();
@@ -190,12 +257,18 @@ export class DataLoader {
         rowObj[key] = provided === lvl ? 1 : 0;
       }
     }
+    for (const level of this.ageGroupLevels) {
+      rowObj[`age_group_1__${level}`] = rowObj.age_group_1 === level ? 1 : 0;
+      rowObj[`age_group_2__${level}`] = rowObj.age_group_2 === level ? 1 : 0;
+    }
     const vec = this.featureNames.map((f) => {
       let v = rowObj[f] ?? 0;
       if (this.numericCols.includes(f)) {
         const mean = this.scaler.mean[f] ?? 0;
         const std = this.scaler.std[f] ?? 1;
         v = std === 0 ? 0 : (v - mean) / std;
+      } else if (this._isAgeGroupFeature(f)) {
+        v = rowObj[f] ?? 0;
       }
       return v;
     });
@@ -255,6 +328,10 @@ export class DataLoader {
       for (const feat of resolvedFeatureNames) {
         if (this.numericCols.includes(feat)) {
           rowArr.push(r[feat]);
+        } else if (this._isAgeGroupFeature(feat)) {
+          const { base, level } = this._parseAgeGroupFeature(feat);
+          const val = (r[base] ?? "").toString();
+          rowArr.push(val === level ? 1 : 0);
         } else {
           const [col, lvl] = feat.split("__");
           const val = (r[col] ?? "").toString();
@@ -325,42 +402,10 @@ export class DataLoader {
     const player1Snapshot = this.getPlayerSnapshot(player1);
     const player2Snapshot = this.getPlayerSnapshot(player2);
 
-    const resolveNumeric = (key, fallback) => {
-      let val = fallback;
-      if (!Number.isFinite(val)) val = 0;
-      if (!alreadyForward) {
-        if (key === "last_winner") {
-          if (val === 0 || val === 1) val = 1 - val;
-        } else if (this._flipOnReverse.has(key)) {
-          val = -val;
-        }
-      }
-      numeric[key] = val;
-      vectorInput[key] = val;
-    };
-
-    const rank1 = Number.isFinite(player1Snapshot?.rank)
-      ? player1Snapshot.rank
-      : (alreadyForward ? match.rank1 : match.rank2);
-    const rank2 = Number.isFinite(player2Snapshot?.rank)
-      ? player2Snapshot.rank
-      : (alreadyForward ? match.rank2 : match.rank1);
-    const rankDiff =
-      Number.isFinite(rank1) && Number.isFinite(rank2) ? rank2 - rank1 : match.numeric.rank_diff;
-    resolveNumeric("rank_diff", rankDiff);
-
-    const pts1 = alreadyForward ? match.pts1 : match.pts2;
-    const pts2 = alreadyForward ? match.pts2 : match.pts1;
-    const ptsDiff = Number.isFinite(pts1) && Number.isFinite(pts2)
-      ? pts1 - pts2
-      : match.numeric.pts_diff;
-    resolveNumeric("pts_diff", ptsDiff);
-
-    resolveNumeric("odd_diff", match.numeric.odd_diff);
-    resolveNumeric("h2h_advantage", match.numeric.h2h_advantage);
-    resolveNumeric("last_winner", match.numeric.last_winner);
-    resolveNumeric("surface_winrate_adv", match.numeric.surface_winrate_adv);
-    resolveNumeric("year", SCENARIO_YEAR);
+    const orientedNumeric = this._orientNumeric(match.numeric, alreadyForward);
+    const ageResolved = this._resolveAgeForScenario(player1, player2, orientedNumeric, match.date);
+    Object.assign(numeric, orientedNumeric, ageResolved.numeric);
+    Object.assign(vectorInput, orientedNumeric, ageResolved.numeric);
 
     const categorical = {};
     for (const col of this.categoricalCols) {
@@ -368,6 +413,19 @@ export class DataLoader {
       categorical[col] = val;
       vectorInput[col] = val;
     }
+
+    const ageGroups = this._computeAgeGroups(numeric.age_1, numeric.age_2);
+    vectorInput.age_1 = numeric.age_1;
+    vectorInput.age_2 = numeric.age_2;
+    vectorInput.age_group_1 = ageGroups.age_group_1;
+    vectorInput.age_group_2 = ageGroups.age_group_2;
+
+    const playerFeatures = this._buildPlayerFeatureView(numeric, {
+      player1,
+      player2,
+      date: match.date,
+      ageGroups
+    });
 
     return {
       players: { player1, player2 },
@@ -385,17 +443,187 @@ export class DataLoader {
       },
       numeric,
       categorical,
+      ageGroups,
+      playerFeatures,
       vectorInput
     };
   }
 
   _featureNamesFromArtifacts() {
     const featureNames = [...this.numericCols];
+    for (const level of this.ageGroupLevels) {
+      featureNames.push(`age_group_1__${level}`);
+      featureNames.push(`age_group_2__${level}`);
+    }
     for (const col of this.categoricalCols) {
       const levels = this.catLevels[col] || [];
       for (const lvl of levels) featureNames.push(`${col}__${lvl}`);
     }
     return featureNames;
+  }
+
+  _orientNumeric(numeric, alreadyForward) {
+    const oriented = {};
+    const swap = (a, b) => ({ a: alreadyForward ? a : b, b: alreadyForward ? b : a });
+    const rankDiff = alreadyForward ? numeric.rank_diff : -numeric.rank_diff;
+    oriented.rank_diff = this._sanitizeNumeric("rank_diff", rankDiff);
+    oriented.pts_diff = this._sanitizeNumeric("pts_diff", alreadyForward ? numeric.pts_diff : -numeric.pts_diff);
+    oriented.odd_diff = this._sanitizeNumeric("odd_diff", alreadyForward ? numeric.odd_diff : -numeric.odd_diff);
+    oriented.h2h_advantage = this._sanitizeNumeric("h2h_advantage", alreadyForward ? numeric.h2h_advantage : -numeric.h2h_advantage);
+    oriented.last_winner = this._sanitizeNumeric("last_winner", alreadyForward ? numeric.last_winner : (1 - numeric.last_winner));
+    oriented.surface_winrate_adv = this._sanitizeNumeric("surface_winrate_adv", alreadyForward ? numeric.surface_winrate_adv : -numeric.surface_winrate_adv);
+
+    for (const [a, b] of this.playerFeaturePairs) {
+      const { a: v1, b: v2 } = swap(numeric[a], numeric[b]);
+      oriented[a] = this._sanitizeNumeric(a, v1);
+      oriented[b] = this._sanitizeNumeric(b, v2);
+    }
+    return oriented;
+  }
+
+  _resolveAgeForScenario(player1, player2, numeric, dateStr) {
+    const dateTs = this._parseDate(dateStr);
+    const refDate = new Date(`${SCENARIO_YEAR}-01-01T00:00:00Z`).getTime();
+    const resolved = { numeric: {} };
+    const age1 = this._resolveAge(player1, numeric.age_1, refDate, dateTs);
+    const age2 = this._resolveAge(player2, numeric.age_2, refDate, dateTs);
+    resolved.numeric.age_1 = age1;
+    resolved.numeric.age_2 = age2;
+    return resolved;
+  }
+
+  _computeAgeGroups(age1, age2) {
+    const resolve = (age) => {
+      const val = Number.isFinite(age) ? age : 0;
+      for (const g of AGE_GROUPS) {
+        if (val >= g.min && val < g.max) return g.label;
+      }
+      return AGE_GROUPS[AGE_GROUPS.length - 1].label;
+    };
+    return { age_group_1: resolve(age1), age_group_2: resolve(age2) };
+  }
+
+  _sanitizeNumeric(key, value) {
+    let v = Number.isFinite(value) ? value : NaN;
+    if (key.startsWith("surface_trend")) {
+      if (!Number.isFinite(v)) v = 0;
+      v = Math.max(-1, Math.min(1, v));
+    }
+    return v;
+  }
+
+  _computeMedians(rows) {
+    const medians = {};
+    for (const c of this.numericCols) {
+      const values = rows.map((r) => this._sanitizeNumeric(c, r[c])).filter((v) => Number.isFinite(v));
+      medians[c] = this._median(values);
+    }
+    return medians;
+  }
+
+  _median(arr) {
+    if (!arr || arr.length === 0) return NaN;
+    const sorted = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
+    return sorted[mid];
+  }
+
+  _normalizeSurfaceTrend(row, meta) {
+    const clamp = (val) => {
+      if (!Number.isFinite(val)) return 0;
+      return Math.max(-1, Math.min(1, val));
+    };
+    row.surface_trend_1 = clamp(row.surface_trend_1);
+    row.surface_trend_2 = clamp(row.surface_trend_2);
+    meta.numeric.surface_trend_1 = row.surface_trend_1;
+    meta.numeric.surface_trend_2 = row.surface_trend_2;
+  }
+
+  _buildPlayerFeatureView(sourceNumeric, ctx) {
+    const ageGroups = ctx?.ageGroups || this._computeAgeGroups(sourceNumeric.age_1, sourceNumeric.age_2);
+    return {
+      [ctx.player1]: {
+        age: sourceNumeric.age_1,
+        ageGroup: ageGroups.age_group_1,
+        streak: sourceNumeric.streak_1,
+        streakValue: sourceNumeric.streak_value_1,
+        recent5: sourceNumeric.recent_win_rate_5_1,
+        recent10: sourceNumeric.recent_win_rate_10_1,
+        fatigue7: sourceNumeric.fatigue_7d_1,
+        fatigue14: sourceNumeric.fatigue_14d_1,
+        fatigue30: sourceNumeric.fatigue_30d_1,
+        surfaceTrend: sourceNumeric.surface_trend_1,
+        date: ctx.date,
+      },
+      [ctx.player2]: {
+        age: sourceNumeric.age_2,
+        ageGroup: ageGroups.age_group_2,
+        streak: sourceNumeric.streak_2,
+        streakValue: sourceNumeric.streak_value_2,
+        recent5: sourceNumeric.recent_win_rate_5_2,
+        recent10: sourceNumeric.recent_win_rate_10_2,
+        fatigue7: sourceNumeric.fatigue_7d_2,
+        fatigue14: sourceNumeric.fatigue_14d_2,
+        fatigue30: sourceNumeric.fatigue_30d_2,
+        surfaceTrend: sourceNumeric.surface_trend_2,
+        date: ctx.date,
+      }
+    };
+  }
+
+  async _ensureAgesLoaded() {
+    if (this.ageMap && this.ageMap.size > 0) return;
+    try {
+      const data = await this._loadAgeCSV();
+      if (data && data.size > 0) this.ageMap = data;
+    } catch (err) {
+      console.warn("Age CSV not loaded; continuing with dataset values only", err);
+    }
+  }
+
+  async _loadAgeCSV() {
+    const res = await fetch(`./wta_age.csv?v=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) return new Map();
+    const text = await res.text();
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    const map = new Map();
+    for (const line of lines.slice(1)) {
+      const [name, birth] = line.split(",").map((v) => v.trim());
+      if (!name || !birth) continue;
+      map.set(name, birth);
+    }
+    return map;
+  }
+
+  _resolveAge(player, existingAge, refTs, fallbackTs) {
+    if (!player) return Number.isFinite(existingAge) ? existingAge : NaN;
+    const birthStr = this.ageMap.get(player);
+    if (!birthStr) return Number.isFinite(existingAge) ? existingAge : NaN;
+    const birthTs = this._parseDate(birthStr);
+    const reference = Number.isFinite(refTs) ? refTs : fallbackTs;
+    if (!Number.isFinite(birthTs) || !Number.isFinite(reference)) {
+      return Number.isFinite(existingAge) ? existingAge : NaN;
+    }
+    const years = (reference - birthTs) / (365.25 * 24 * 3600 * 1000);
+    return Number.isFinite(years) ? Math.max(14, years) : existingAge;
+  }
+
+  _resolveAgeGroups(player1, player2, row, matchDate) {
+    const age1 = this._resolveAge(player1, row.age_1, this._parseDate(matchDate));
+    const age2 = this._resolveAge(player2, row.age_2, this._parseDate(matchDate));
+    row.age_1 = Number.isFinite(age1) ? age1 : row.age_1;
+    row.age_2 = Number.isFinite(age2) ? age2 : row.age_2;
+    return this._computeAgeGroups(row.age_1, row.age_2);
+  }
+
+  _isAgeGroupFeature(name) {
+    return name.startsWith("age_group_1__") || name.startsWith("age_group_2__");
+  }
+
+  _parseAgeGroupFeature(name) {
+    const [base, level] = name.split("__");
+    return { base, level };
   }
 
   _buildPlayerStats(metaRows) {

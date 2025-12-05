@@ -10,8 +10,8 @@ const SCENARIO_YEAR = 2025;
 const DEFAULT_HYPERPARAMS = {
   batchSize: 256,
   validationSplit: 0.2,
-  hiddenUnits: [128, 64],
-  dropout: 0.3,
+  hiddenUnits: [128, 64, 32],
+  dropout: 0,
 };
 
 let loader = null;
@@ -41,6 +41,9 @@ const els = {
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
+  playerCards: document.getElementById("playerCards"),
+  player1Card: document.getElementById("player1Card"),
+  player2Card: document.getElementById("player2Card"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
@@ -151,6 +154,7 @@ function resetAutoPredictPanel(message) {
   els.matchSummary.textContent = message;
   els.featureTableBody.innerHTML = "";
   els.predictOut.textContent = "";
+  renderPlayerCards(null);
   currentAutoVector = null;
   currentAutoPayload = null;
   els.predictBtn.disabled = true;
@@ -309,11 +313,8 @@ function updateAutoPreview() {
     resetAutoPredictPanel("No matchup with these players was found in the dataset. Try another pairing.");
     return;
   }
-  payload.numeric.year = SCENARIO_YEAR;
-  payload.vectorInput.year = SCENARIO_YEAR;
   currentAutoPayload = payload;
   currentAutoVector = { ...payload.vectorInput };
-  currentAutoVector.year = SCENARIO_YEAR;
   applyCategoryDefaultsFromPayload(currentAutoPayload);
   renderAutoFeatureTable(currentAutoPayload);
   els.matchSummary.textContent = describeMatchSummary(currentAutoPayload);
@@ -328,16 +329,26 @@ function updateAutoPreview() {
 
 function renderAutoFeatureTable(payload) {
   const rows = [];
-  loader.numericCols.forEach((col) => {
-    const value = payload.numeric[col];
+  const numeric = payload?.numeric || {};
+  const cats = payload?.categorical || {};
+  const ageGroups = payload?.ageGroups || {};
+  const primary = [
+    "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "last_winner", "surface_winrate_adv",
+    "age_1", "age_2"
+  ];
+  primary.forEach((col) => {
+    const value = numeric[col];
     rows.push(`<tr><td>${col}</td><td>${formatFeatureValue(col, value)}</td></tr>`);
   });
+  rows.push(`<tr><td>age_group_1</td><td>${formatAgeGroup(ageGroups.age_group_1)}</td></tr>`);
+  rows.push(`<tr><td>age_group_2</td><td>${formatAgeGroup(ageGroups.age_group_2)}</td></tr>`);
   loader.categoricalCols.forEach((col) => {
-    const value = payload.categorical[col] ?? "";
+    const value = cats[col] ?? "";
     const display = value ? escapeHtml(value) : "—";
     rows.push(`<tr><td>${col}</td><td>${display}</td></tr>`);
   });
   els.featureTableBody.innerHTML = rows.join("");
+  renderPlayerCards(payload);
 }
 
 function formatFeatureValue(key, value) {
@@ -360,6 +371,48 @@ function formatFeatureValue(key, value) {
   const abs = Math.abs(value);
   const decimals = abs >= 100 ? 1 : 3;
   return Number(value).toFixed(decimals);
+}
+
+function formatAgeGroup(value) {
+  if (!value) return "—";
+  const map = {
+    lt20: "<20",
+    "20_24": "20–24",
+    "25_29": "25–29",
+    "30_34": "30–34",
+    "35_plus": "35+",
+  };
+  return map[value] || escapeHtml(value.toString());
+}
+
+function renderPlayerCards(payload) {
+  if (!els.playerCards || !els.player1Card || !els.player2Card) return;
+  if (!payload) {
+    els.player1Card.innerHTML = "<div class=\"small muted\">Player 1 stats will appear here.</div>";
+    els.player2Card.innerHTML = "<div class=\"small muted\">Player 2 stats will appear here.</div>";
+    return;
+  }
+  const { players = {}, playerFeatures = {} } = payload;
+  const renderCard = (cardEl, nameKey) => {
+    const name = players[nameKey] || nameKey;
+    const stats = playerFeatures[name] || {};
+    const rows = [
+      `<div class="card-title">${escapeHtml(name || "—")}</div>`,
+      `<div class="stat-line"><span>Age</span><span>${formatFeatureValue("age", stats.age)}</span></div>`,
+      `<div class="stat-line"><span>Age group</span><span>${formatAgeGroup(stats.ageGroup)}</span></div>`,
+      `<div class="stat-line"><span>Streak</span><span>${formatFeatureValue("streak", stats.streak)}</span></div>`,
+      `<div class="stat-line"><span>Streak value</span><span>${formatFeatureValue("streak_value", stats.streakValue)}</span></div>`,
+      `<div class="stat-line"><span>Win rate (5)</span><span>${formatFeatureValue("recent5", stats.recent5)}</span></div>`,
+      `<div class="stat-line"><span>Win rate (10)</span><span>${formatFeatureValue("recent10", stats.recent10)}</span></div>`,
+      `<div class="stat-line"><span>Fatigue 7d</span><span>${formatFeatureValue("fatigue7", stats.fatigue7)}</span></div>`,
+      `<div class="stat-line"><span>Fatigue 14d</span><span>${formatFeatureValue("fatigue14", stats.fatigue14)}</span></div>`,
+      `<div class="stat-line"><span>Fatigue 30d</span><span>${formatFeatureValue("fatigue30", stats.fatigue30)}</span></div>`,
+      `<div class="stat-line"><span>Surface trend</span><span>${formatFeatureValue("surface_trend", stats.surfaceTrend)}</span></div>`,
+    ];
+    cardEl.innerHTML = rows.join("");
+  };
+  renderCard(els.player1Card, "player1");
+  renderCard(els.player2Card, "player2");
 }
 
 function describeMatchSummary(payload) {
@@ -448,7 +501,11 @@ async function trainModel() {
   if (!dataset) return alert("Dataset not loaded yet.");
   if (model) model.dispose();
   const hyper = readHyperparameters();
-  model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
+  model = new ModelMLP(dataset.featureNames.length, {
+    ...hyper.architecture,
+    featureNames: dataset.featureNames,
+    featureIndexMap: dataset.featureIndexMap,
+  });
   model.build();
   log("Training started...");
   const losses = [], valAcc = [];
@@ -557,7 +614,10 @@ els.saveBtn.addEventListener("click", async () => {
 });
 els.loadModelBtn.addEventListener("click", async () => {
   try {
-    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
+    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0, {
+      featureNames: dataset?.featureNames || [],
+      featureIndexMap: dataset?.featureIndexMap || {},
+    });
     await m.load();
     model = m;
     log("Model loaded from browser storage.");
