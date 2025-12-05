@@ -170,13 +170,14 @@ export class DataLoader {
     // Fit categorical levels and scalers only on training data
     this._fitCategoricals(trainRows);
     const { X: X_train_raw, y: y_train, featureNames } = this._buildDesignMatrix(trainRows);
-    this.featureNames = featureNames;
+    const cleanedFeatureNames = this._cleanFeatureNames(featureNames);
+    this.featureNames = cleanedFeatureNames;
     this.featureIndexMap = this.featureNames.reduce((acc, f, i) => { acc[f] = i; return acc; }, {});
-    this._fitScaler(X_train_raw, featureNames);
+    this._fitScaler(X_train_raw, cleanedFeatureNames);
 
-    const X_train_scaled = this._transformWithScaler(X_train_raw, featureNames);
-    const { X: X_test_raw, y: y_test } = this._buildDesignMatrix(testRows, featureNames);
-    const X_test_scaled = this._transformWithScaler(X_test_raw, featureNames);
+    const X_train_scaled = this._transformWithScaler(X_train_raw, cleanedFeatureNames);
+    const { X: X_test_raw, y: y_test } = this._buildDesignMatrix(testRows, cleanedFeatureNames);
+    const X_test_scaled = this._transformWithScaler(X_test_raw, cleanedFeatureNames);
 
     // To tensors
     const xTrainTensor = tf.tensor2d(X_train_scaled, [X_train_scaled.length, featureNames.length], "float32");
@@ -459,7 +460,16 @@ export class DataLoader {
       const levels = this.catLevels[col] || [];
       for (const lvl of levels) featureNames.push(`${col}__${lvl}`);
     }
-    return featureNames;
+    return this._cleanFeatureNames(featureNames);
+  }
+
+  _cleanFeatureNames(featureNames) {
+    const incoming = Array.isArray(featureNames) ? featureNames : [];
+    const cleaned = incoming.filter((name) => name && name !== this.labelCol);
+    if (incoming.length !== cleaned.length) {
+      console.warn(`Label column "${this.labelCol}" was present in features and has been removed.`);
+    }
+    return cleaned;
   }
 
   _orientNumeric(numeric, alreadyForward) {
