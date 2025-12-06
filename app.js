@@ -539,8 +539,8 @@ async function trainModel() {
 async function evaluateModel() {
   if (!dataset || !model) return alert("Train the model first.");
   log("Evaluating on test set...");
-  const { loss, acc } = await model.evaluate(dataset.X_test, dataset.y_test);
-  log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
+  const { loss, acc, metricAcc } = await model.evaluate(dataset.X_test, dataset.y_test);
+  log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)} (tf: ${metricAcc.toFixed(4)})`);
   const cm = await model.confusionMatrix(dataset.X_test, dataset.y_test);
   drawConfusionMatrix(cm);
 }

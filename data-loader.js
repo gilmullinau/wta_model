@@ -180,9 +180,9 @@ export class DataLoader {
     const X_test_scaled = this._transformWithScaler(X_test_raw, cleanedFeatureNames);
 
     // To tensors
-    const xTrainTensor = tf.tensor2d(X_train_scaled, [X_train_scaled.length, featureNames.length], "float32");
+    const xTrainTensor = tf.tensor2d(X_train_scaled, [X_train_scaled.length, this.featureNames.length], "float32");
     const yTrainTensor = tf.tensor2d(y_train.map(v => [v]), [y_train.length, 1], "float32");
-    const xTestTensor = tf.tensor2d(X_test_scaled, [X_test_scaled.length, featureNames.length], "float32");
+    const xTestTensor = tf.tensor2d(X_test_scaled, [X_test_scaled.length, this.featureNames.length], "float32");
     const yTestTensor = tf.tensor2d(y_test.map(v => [v]), [y_test.length, 1], "float32");
 
     return {
@@ -322,7 +322,8 @@ export class DataLoader {
   }
 
   _buildDesignMatrix(rows, featureNames = null) {
-    const resolvedFeatureNames = featureNames ? featureNames.slice() : this._featureNamesFromArtifacts();
+    const baseFeatureNames = featureNames ? featureNames.slice() : this._featureNamesFromArtifacts();
+    const resolvedFeatureNames = this._cleanFeatureNames(baseFeatureNames);
     const X = [], y = [];
     for (const r of rows) {
       const rowArr = [];

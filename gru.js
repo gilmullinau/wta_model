@@ -59,10 +59,22 @@ export class ModelMLP {
     const lossTensor = evalOut[0];
     const accTensor = evalOut[1];
     const loss = (await lossTensor.data())[0];
-    const acc = (await accTensor.data())[0];
+    const metricAcc = (await accTensor.data())[0];
+
+    const preds = this.model.predict(X_test);
+    const probs = await preds.data();
+    const labels = Array.from(await y_test.data()).map((v) => Math.round(v));
+    let correct = 0;
+    for (let i = 0; i < labels.length; i++) {
+      const pred = probs[i] >= 0.5 ? 1 : 0;
+      if (pred === labels[i]) correct++;
+    }
+    const manualAcc = labels.length ? correct / labels.length : 0;
+
     lossTensor.dispose();
     accTensor.dispose();
-    return { loss, acc };
+    preds.dispose();
+    return { loss, acc: manualAcc, metricAcc };
   }
 
   predictProba(X) {
