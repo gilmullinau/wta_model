@@ -37,7 +37,6 @@ const els = {
   surfaceSelect: document.getElementById("surfaceSelect"),
   courtSelect: document.getElementById("courtSelect"),
   roundSelect: document.getElementById("roundSelect"),
-  featureTableBody: document.getElementById("featureTableBody"),
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
@@ -53,6 +52,13 @@ const els = {
   layer2Input: document.getElementById("layer2Units"),
   dropoutInput: document.getElementById("dropoutRate"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
+  modelStatus: document.getElementById("modelStatus"),
+  tennisBg: document.getElementById("tennisBg"),
+  player1Pros: document.getElementById("player1Pros"),
+  player1Cons: document.getElementById("player1Cons"),
+  player2Pros: document.getElementById("player2Pros"),
+  player2Cons: document.getElementById("player2Cons"),
+  neutralInsights: document.getElementById("neutralInsights"),
 };
 
 const CATEGORY_FIELDS = [
@@ -70,6 +76,12 @@ function log(msg) {
     els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
   }
   els.logs.scrollTop = els.logs.scrollHeight;
+}
+
+function setModelStatus(text) {
+  if (els.modelStatus) {
+    els.modelStatus.textContent = text;
+  }
 }
 
 function enableTraining(enabled) {
@@ -100,10 +112,11 @@ async function parseAndInit(text) {
     dataset = await loader.loadCSVText(text);
     els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
     log("Dataset loaded successfully.");
-    enableTraining(true);
+    enableTraining(false);
     buildPredictForm();
     els.saveBtn.disabled = true;
     showPredictPanel(false);
+    await ensureModelReady();
   } catch (err) {
     console.error(err);
     els.info.textContent = `Dataset error: ${err.message}`;
@@ -133,6 +146,37 @@ async function autoLoadCSV() {
   }
 }
 
+async function ensureModelReady() {
+  if (!dataset) return;
+  try {
+    setModelStatus("Model: loading saved neural net…");
+    const m = new ModelMLP(dataset.featureNames.length, {
+      featureNames: dataset.featureNames,
+      featureIndexMap: dataset.featureIndexMap,
+    });
+    await m.load();
+    model = m;
+    log("Model loaded from browser storage.");
+    enableTraining(true);
+    showPredictPanel(true);
+    setModelStatus("Model: ready (restored)");
+    return;
+  } catch (err) {
+    console.warn("Starter model missing, training a fresh one.", err?.message);
+  }
+
+  try {
+    setModelStatus("Model: training starter model…");
+    await trainModel({ silent: true, autoSave: true, label: "Starter training" });
+    setModelStatus("Model: ready (auto-trained)");
+  } catch (err) {
+    console.error(err);
+    log(`Starter training failed: ${err.message}`);
+    setModelStatus("Model: needs training");
+    enableTraining(true);
+  }
+}
+
 function buildPredictForm() {
   if (!loader || !dataset) return;
   const players = loader.getPlayerNames();
@@ -152,9 +196,13 @@ function buildPredictForm() {
 
 function resetAutoPredictPanel(message) {
   els.matchSummary.textContent = message;
-  els.featureTableBody.innerHTML = "";
   els.predictOut.textContent = "";
   renderPlayerCards(null);
+  setInsightList(els.player1Pros, [], "Waiting for Player 1");
+  setInsightList(els.player1Cons, [], "—");
+  setInsightList(els.player2Pros, [], "Waiting for Player 2");
+  setInsightList(els.player2Cons, [], "—");
+  setInsightList(els.neutralInsights, [], "Pick players to see the matchup story.");
   currentAutoVector = null;
   currentAutoPayload = null;
   els.predictBtn.disabled = true;
@@ -233,7 +281,7 @@ function handleCategorySelectChange(column) {
   currentAutoPayload.categorical[column] = value;
   if (currentAutoPayload.vectorInput) currentAutoPayload.vectorInput[column] = value;
   currentAutoVector[column] = value;
-  renderAutoFeatureTable(currentAutoPayload);
+  renderFriendlyInsights(currentAutoPayload);
 }
 
 function populatePlayer2Options(player1) {
@@ -267,6 +315,15 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function setInsightList(el, items, placeholder = "") {
+  if (!el) return;
+  if (!items || items.length === 0) {
+    el.innerHTML = placeholder ? `<li>${escapeHtml(placeholder)}</li>` : "";
+    return;
+  }
+  el.innerHTML = items.map((text) => `<li>${escapeHtml(text)}</li>`).join("");
 }
 
 function handlePlayer1Change() {
@@ -316,7 +373,7 @@ function updateAutoPreview() {
   currentAutoPayload = payload;
   currentAutoVector = { ...payload.vectorInput };
   applyCategoryDefaultsFromPayload(currentAutoPayload);
-  renderAutoFeatureTable(currentAutoPayload);
+  renderFriendlyInsights(currentAutoPayload);
   els.matchSummary.textContent = describeMatchSummary(currentAutoPayload);
   if (!model) {
     els.predictBtn.disabled = true;
@@ -327,33 +384,21 @@ function updateAutoPreview() {
   }
 }
 
-function renderAutoFeatureTable(payload) {
-  const rows = [];
-  const numeric = payload?.numeric || {};
-  const cats = payload?.categorical || {};
-  const ageGroups = payload?.ageGroups || {};
-  const primary = [
-    "rank_diff", "pts_diff", "odd_diff", "h2h_advantage", "last_winner", "surface_winrate_adv",
-    "age_1", "age_2"
-  ];
-  primary.forEach((col) => {
-    const value = numeric[col];
-    rows.push(`<tr><td>${col}</td><td>${formatFeatureValue(col, value)}</td></tr>`);
-  });
-  rows.push(`<tr><td>age_group_1</td><td>${formatAgeGroup(ageGroups.age_group_1)}</td></tr>`);
-  rows.push(`<tr><td>age_group_2</td><td>${formatAgeGroup(ageGroups.age_group_2)}</td></tr>`);
-  loader.categoricalCols.forEach((col) => {
-    const value = cats[col] ?? "";
-    const display = value ? escapeHtml(value) : "—";
-    rows.push(`<tr><td>${col}</td><td>${display}</td></tr>`);
-  });
-  els.featureTableBody.innerHTML = rows.join("");
+function renderFriendlyInsights(payload) {
   renderPlayerCards(payload);
+  if (!payload) return;
+  const { pros1, cons1, pros2, cons2, neutral } = buildInsights(payload);
+  setInsightList(els.player1Pros, pros1, "Waiting for Player 1");
+  setInsightList(els.player1Cons, cons1, "No obvious risks");
+  setInsightList(els.player2Pros, pros2, "Waiting for Player 2");
+  setInsightList(els.player2Cons, cons2, "No obvious risks");
+  setInsightList(els.neutralInsights, neutral, "Pick players to see the matchup story.");
 }
 
 function formatFeatureValue(key, value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   if (key === "year") return `${value} (scenario year)`;
+  if (key === "age") return `${Number(value).toFixed(1)} yrs`;
   if (key === "rank_diff") {
     const p1 = currentAutoPayload?.players?.player1 || "Player 1";
     const p2 = currentAutoPayload?.players?.player2 || "Player 2";
@@ -367,6 +412,12 @@ function formatFeatureValue(key, value) {
   if (key === "last_winner") {
     const label = currentAutoPayload?.players?.player1 || "Player 1";
     return `${value} (${value === 1 ? `${label} won last` : `${label} did not win last`})`;
+  }
+  if (key === "recent5" || key === "recent10") {
+    return `${formatPercent(value)} win rate`;
+  }
+  if (key?.startsWith("fatigue")) {
+    return `${Number(value).toFixed(1)} workload index`;
   }
   const abs = Math.abs(value);
   const decimals = abs >= 100 ? 1 : 3;
@@ -385,6 +436,103 @@ function formatAgeGroup(value) {
   return map[value] || escapeHtml(value.toString());
 }
 
+function buildInsights(payload) {
+  const numeric = payload?.numeric || {};
+  const ageGroups = payload?.ageGroups || {};
+  const players = payload?.players || {};
+  const p1 = players.player1 || "Player 1";
+  const p2 = players.player2 || "Player 2";
+
+  const pros1 = [], pros2 = [], cons1 = [], cons2 = [], neutral = [];
+
+  const rankDiff = numeric.rank_diff;
+  if (isFiniteNumber(rankDiff)) {
+    if (rankDiff < -2) {
+      pros1.push(`${p1} is ranked ${Math.abs(rankDiff).toFixed(0)} spots higher than ${p2}.`);
+      cons2.push(`${p2} trails in ranking for now.`);
+    } else if (rankDiff > 2) {
+      pros2.push(`${p2} holds a ranking edge of ${Math.abs(rankDiff).toFixed(0)} spots.`);
+      cons1.push(`${p1} will need to punch above ranking.`);
+    } else neutral.push("Rankings are very close on paper.");
+  }
+
+  const pointsDiff = numeric.pts_diff;
+  if (isFiniteNumber(pointsDiff)) {
+    const edge = Math.abs(pointsDiff);
+    if (edge >= 25) {
+      const target = pointsDiff >= 0 ? pros1 : pros2;
+      target.push(`Recent points tilt toward ${pointsDiff >= 0 ? p1 : p2} by about ${edge.toFixed(0)}.`);
+    }
+  }
+
+  if (numeric.last_winner === 1) pros1.push(`${p1} won the last meeting.`);
+  if (numeric.last_winner === 0) pros2.push(`${p2} won the last meeting.`);
+
+  if (isFiniteNumber(numeric.h2h_advantage)) {
+    if (numeric.h2h_advantage > 0) pros1.push(`${p1} leads the head-to-head record.`);
+    else if (numeric.h2h_advantage < 0) pros2.push(`${p2} leads the head-to-head record.`);
+  }
+
+  const win5_1 = numeric.recent_win_rate_5_1;
+  const win5_2 = numeric.recent_win_rate_5_2;
+  if (isFiniteNumber(win5_1) && isFiniteNumber(win5_2)) {
+    const diff = win5_1 - win5_2;
+    if (Math.abs(diff) >= 0.05) {
+      const target = diff > 0 ? pros1 : pros2;
+      target.push(`${diff > 0 ? p1 : p2} has the hotter 5-match win rate (${formatPercent(Math.max(win5_1, win5_2))}).`);
+    }
+  }
+
+  const win10_1 = numeric.recent_win_rate_10_1;
+  const win10_2 = numeric.recent_win_rate_10_2;
+  if (isFiniteNumber(win10_1) && isFiniteNumber(win10_2)) {
+    const diff = win10_1 - win10_2;
+    if (Math.abs(diff) >= 0.05) {
+      const target = diff > 0 ? pros1 : pros2;
+      target.push(`Over 10 matches, ${diff > 0 ? p1 : p2} has steadier results (${formatPercent(Math.max(win10_1, win10_2))}).`);
+    }
+  }
+
+  const streakValue1 = numeric.streak_value_1;
+  const streakValue2 = numeric.streak_value_2;
+  if (isFiniteNumber(streakValue1) && isFiniteNumber(streakValue2) && Math.abs(streakValue1 - streakValue2) >= 1) {
+    const target = streakValue1 > streakValue2 ? pros1 : pros2;
+    target.push(`${streakValue1 > streakValue2 ? p1 : p2} comes in on the stronger streak.`);
+  }
+
+  const fatigue1 = average([numeric.fatigue_7d_1, numeric.fatigue_14d_1, numeric.fatigue_30d_1]);
+  const fatigue2 = average([numeric.fatigue_7d_2, numeric.fatigue_14d_2, numeric.fatigue_30d_2]);
+  if (isFiniteNumber(fatigue1) && isFiniteNumber(fatigue2)) {
+    const diff = fatigue2 - fatigue1;
+    if (diff > 1) {
+      pros1.push(`${p1} looks fresher based on recent workload.`);
+      cons2.push(`${p2} has logged more minutes recently.`);
+    } else if (diff < -1) {
+      pros2.push(`${p2} looks fresher based on recent workload.`);
+      cons1.push(`${p1} has logged more minutes recently.`);
+    }
+  }
+
+  if (isFiniteNumber(numeric.surface_trend_1) && isFiniteNumber(numeric.surface_trend_2)) {
+    const diff = numeric.surface_trend_1 - numeric.surface_trend_2;
+    if (diff > 0.1) pros1.push(`${p1} has better momentum on this surface.`);
+    else if (diff < -0.1) pros2.push(`${p2} has better momentum on this surface.`);
+    else neutral.push("Surface trends are evenly matched.");
+  }
+
+  if (ageGroups.age_group_1 || ageGroups.age_group_2) {
+    neutral.push(`${p1} age group: ${formatAgeGroup(ageGroups.age_group_1)}; ${p2} age group: ${formatAgeGroup(ageGroups.age_group_2)}.`);
+  }
+
+  const oddDiff = numeric.odd_diff;
+  if (isFiniteNumber(oddDiff) && Math.abs(oddDiff) > 0.05) {
+    const fav = oddDiff < 0 ? p1 : p2;
+    neutral.push(`${fav} entered the last matchup as the favored player.`);
+  }
+
+  return { pros1, cons1, pros2, cons2, neutral };
+}
+
 function renderPlayerCards(payload) {
   if (!els.playerCards || !els.player1Card || !els.player2Card) return;
   if (!payload) {
@@ -400,8 +548,8 @@ function renderPlayerCards(payload) {
       `<div class="card-title">${escapeHtml(name || "—")}</div>`,
       `<div class="stat-line"><span>Age</span><span>${formatFeatureValue("age", stats.age)}</span></div>`,
       `<div class="stat-line"><span>Age group</span><span>${formatAgeGroup(stats.ageGroup)}</span></div>`,
-      `<div class="stat-line"><span>Streak</span><span>${formatFeatureValue("streak", stats.streak)}</span></div>`,
-      `<div class="stat-line"><span>Streak value</span><span>${formatFeatureValue("streak_value", stats.streakValue)}</span></div>`,
+      `<div class="stat-line"><span>Form streak</span><span>${formatFeatureValue("streak", stats.streak)}</span></div>`,
+      `<div class="stat-line"><span>Momentum</span><span>${formatFeatureValue("streak_value", stats.streakValue)}</span></div>`,
       `<div class="stat-line"><span>Win rate (5)</span><span>${formatFeatureValue("recent5", stats.recent5)}</span></div>`,
       `<div class="stat-line"><span>Win rate (10)</span><span>${formatFeatureValue("recent10", stats.recent10)}</span></div>`,
       `<div class="stat-line"><span>Fatigue 7d</span><span>${formatFeatureValue("fatigue7", stats.fatigue7)}</span></div>`,
@@ -419,7 +567,7 @@ function describeMatchSummary(payload) {
   const { datasetMatch, players, playerSnapshots } = payload;
   const segments = [];
   if (players?.player1 && players?.player2) {
-    segments.push(`${players.player1} vs ${players.player2} planned for ${SCENARIO_YEAR}.`);
+    segments.push(`${players.player1} vs ${players.player2} set for ${SCENARIO_YEAR}.`);
   } else {
     segments.push(`Scenario year fixed to ${SCENARIO_YEAR}.`);
   }
@@ -459,8 +607,7 @@ function describeMatchSummary(payload) {
     if (snapshotLine) segments.push(snapshotLine);
   }
 
-  segments.push("Points difference and last_winner come from the most recent head-to-head meeting.");
-  segments.push("Adjust surface, court, and round selectors to reflect your planned conditions.");
+  segments.push("Surface, court, and round default to the most recent clash — adjust them for your scenario.");
   return segments.join(" ");
 }
 
@@ -497,8 +644,27 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-async function trainModel() {
-  if (!dataset) return alert("Dataset not loaded yet.");
+function formatPercent(value) {
+  if (!isFiniteNumber(value)) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
+function average(values = []) {
+  const nums = values.filter(isFiniteNumber);
+  if (nums.length === 0) return NaN;
+  return nums.reduce((sum, v) => sum + v, 0) / nums.length;
+}
+
+async function trainModel(eventOrOpts) {
+  const isEvent = eventOrOpts && typeof eventOrOpts.preventDefault === "function";
+  if (isEvent) eventOrOpts.preventDefault();
+  const opts = isEvent ? {} : (eventOrOpts || {});
+  const silent = Boolean(opts.silent);
+  const label = opts.label || "Training";
+  if (!dataset) {
+    if (!silent) alert("Dataset not loaded yet.");
+    return;
+  }
   if (model) model.dispose();
   const hyper = readHyperparameters();
   model = new ModelMLP(dataset.featureNames.length, {
@@ -507,7 +673,8 @@ async function trainModel() {
     featureIndexMap: dataset.featureIndexMap,
   });
   model.build();
-  log("Training started...");
+  log(`${label} started...`);
+  setModelStatus(`${label}: running`);
   const losses = [], valAcc = [];
   enableTraining(false);
   try {
@@ -524,13 +691,21 @@ async function trainModel() {
       }
     });
 
-    log("Training complete.");
+    log(`${label} complete.`);
     els.saveBtn.disabled = false;
     els.evalBtn.disabled = false;
     showPredictPanel(true);
+    setModelStatus("Model: ready");
+    if (opts.autoSave) {
+      await model.save();
+      log("Starter model saved to browser storage.");
+    }
+    if (opts.onComplete) opts.onComplete();
   } catch (err) {
     log(`Training failed: ${err.message}`);
-    alert(err.message);
+    if (!silent) alert(err.message);
+    setModelStatus("Model: training failed");
+    throw err;
   } finally {
     enableTraining(true);
   }
@@ -582,6 +757,20 @@ function drawConfusionMatrix({ tp, tn, fp, fn }) {
   });
 }
 
+function initTennisBackground() {
+  if (!els.tennisBg) return;
+  const count = 18;
+  for (let i = 0; i < count; i++) {
+    const ball = document.createElement("span");
+    ball.className = "tennis-ball";
+    ball.style.left = `${Math.random() * 100}%`;
+    ball.style.animationDelay = `${Math.random() * 6}s`;
+    ball.style.setProperty("--duration", `${6 + Math.random() * 6}s`);
+    ball.style.setProperty("--scale", `${0.6 + Math.random() * 0.8}`);
+    els.tennisBg.appendChild(ball);
+  }
+}
+
 async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
@@ -597,8 +786,10 @@ async function handlePredict(e) {
     const pred = prob >= 0.5 ? 1 : 0;
     const player1 = currentAutoPayload?.players?.player1 || "Player 1";
     const player2 = currentAutoPayload?.players?.player2 || "Player 2";
-    const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
-    els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
+    const outcome = pred === 1 ? `${player1} favored` : `${player2} favored`;
+    const pct1 = (prob * 100).toFixed(1);
+    const pct2 = (100 - prob * 100).toFixed(1);
+    els.predictOut.textContent = `${outcome} — win chance ${pct1}% for ${player1} / ${pct2}% for ${player2}`;
     x.dispose(); yProb.dispose();
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
@@ -614,6 +805,7 @@ els.saveBtn.addEventListener("click", async () => {
 });
 els.loadModelBtn.addEventListener("click", async () => {
   try {
+    setModelStatus("Model: loading saved neural net…");
     const m = new ModelMLP(dataset ? dataset.featureNames.length : 0, {
       featureNames: dataset?.featureNames || [],
       featureIndexMap: dataset?.featureIndexMap || {},
@@ -623,11 +815,13 @@ els.loadModelBtn.addEventListener("click", async () => {
     log("Model loaded from browser storage.");
     showPredictPanel(true);
     enableTraining(Boolean(dataset));
+    setModelStatus("Model: ready (restored)");
     if (!dataset || !loader) {
       log("Load a dataset to enable predictions with the restored model.");
     }
   } catch {
     alert("No saved model found or load failed.");
+    setModelStatus("Model: needs training");
   }
 });
 CATEGORY_FIELDS.forEach(({ key, el }) => {
@@ -647,6 +841,7 @@ console.log("🚀 App initialized — calling autoLoadCSV()");
 enableTraining(false);
 buildCategoryControls();
 showPredictPanel(false);
+initTennisBackground();
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
