@@ -72,13 +72,16 @@ const CATEGORY_FIELDS = [
 
 function log(msg) {
   const time = new Date().toLocaleTimeString();
-  els.logs.textContent += `[${time}] ${msg}\n`;
-  const lines = els.logs.textContent.split("\n");
-  if (lines.length > LOG_MAX_LINES) {
-    const trimmed = lines.slice(-LOG_MAX_LINES).join("\n");
-    els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
+  if (els.logs) {
+    els.logs.textContent += `[${time}] ${msg}\n`;
+    const lines = els.logs.textContent.split("\n");
+    if (lines.length > LOG_MAX_LINES) {
+      const trimmed = lines.slice(-LOG_MAX_LINES).join("\n");
+      els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
+    }
+    els.logs.scrollTop = els.logs.scrollHeight;
   }
-  els.logs.scrollTop = els.logs.scrollHeight;
+  console.log(`[${time}] ${msg}`);
 }
 
 function setModelStatus(text, options = {}) {
@@ -94,9 +97,9 @@ function setModelStatus(text, options = {}) {
 }
 
 function enableTraining(enabled) {
-  els.trainBtn.disabled = !enabled;
-  els.evalBtn.disabled = !enabled || !model;
-  els.saveBtn.disabled = !enabled || !model;
+  if (els.trainBtn) els.trainBtn.disabled = !enabled;
+  if (els.evalBtn) els.evalBtn.disabled = !enabled || !model;
+  if (els.saveBtn) els.saveBtn.disabled = !enabled || !model;
 }
 
 function showPredictPanel(show) {
@@ -123,7 +126,7 @@ async function parseAndInit(text) {
     log("Dataset loaded successfully.");
     enableTraining(false);
     buildPredictForm();
-    els.saveBtn.disabled = true;
+    if (els.saveBtn) els.saveBtn.disabled = true;
     showPredictPanel(false);
     await ensureModelReady();
   } catch (err) {
@@ -704,8 +707,8 @@ async function trainModel(eventOrOpts) {
     });
 
     log(`${label} complete.`);
-    els.saveBtn.disabled = false;
-    els.evalBtn.disabled = false;
+    if (els.saveBtn) els.saveBtn.disabled = false;
+    if (els.evalBtn) els.evalBtn.disabled = false;
     showPredictPanel(true);
     setModelStatus("Model: ready");
     if (opts.autoSave) {
@@ -733,7 +736,8 @@ async function evaluateModel() {
 }
 
 function drawLossChart(losses, valAcc) {
-  const ctx = els.lossCanvas.getContext("2d");
+  const ctx = els.lossCanvas?.getContext?.("2d");
+  if (!ctx) return;
   if (lossChart) lossChart.destroy();
   lossChart = new Chart(ctx, {
     type: "line",
@@ -749,7 +753,8 @@ function drawLossChart(losses, valAcc) {
 }
 
 function drawConfusionMatrix({ tp, tn, fp, fn }) {
-  const ctx = els.cmCanvas.getContext("2d");
+  const ctx = els.cmCanvas?.getContext?.("2d");
+  if (!ctx) return;
   if (cmChart) cmChart.destroy();
   cmChart = new Chart(ctx, {
     type: "bar",
@@ -809,33 +814,37 @@ async function handlePredict(e) {
   }
 }
 
-// Buttons
-els.trainBtn.addEventListener("click", trainModel);
-els.evalBtn.addEventListener("click", evaluateModel);
-els.saveBtn.addEventListener("click", async () => {
-  if (model) { await model.save(); log("Model saved to browser storage."); }
-});
-els.loadModelBtn.addEventListener("click", async () => {
-  try {
-    setModelStatus("Model: loading saved neural net…");
-    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0, {
-      featureNames: dataset?.featureNames || [],
-      featureIndexMap: dataset?.featureIndexMap || {},
-    });
-    await m.load();
-    model = m;
-    log("Model loaded from browser storage.");
-    showPredictPanel(true);
-    enableTraining(Boolean(dataset));
-    setModelStatus("Model: ready (restored)");
-    if (!dataset || !loader) {
-      log("Load a dataset to enable predictions with the restored model.");
+// Buttons (guarded for hidden technical controls)
+if (els.trainBtn) els.trainBtn.addEventListener("click", trainModel);
+if (els.evalBtn) els.evalBtn.addEventListener("click", evaluateModel);
+if (els.saveBtn) {
+  els.saveBtn.addEventListener("click", async () => {
+    if (model) { await model.save(); log("Model saved to browser storage."); }
+  });
+}
+if (els.loadModelBtn) {
+  els.loadModelBtn.addEventListener("click", async () => {
+    try {
+      setModelStatus("Model: loading saved neural net…");
+      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0, {
+        featureNames: dataset?.featureNames || [],
+        featureIndexMap: dataset?.featureIndexMap || {},
+      });
+      await m.load();
+      model = m;
+      log("Model loaded from browser storage.");
+      showPredictPanel(true);
+      enableTraining(Boolean(dataset));
+      setModelStatus("Model: ready (restored)");
+      if (!dataset || !loader) {
+        log("Load a dataset to enable predictions with the restored model.");
+      }
+    } catch {
+      alert("No saved model found or load failed.");
+      setModelStatus("Model: needs training");
     }
-  } catch {
-    alert("No saved model found or load failed.");
-    setModelStatus("Model: needs training");
-  }
-});
+  });
+}
 CATEGORY_FIELDS.forEach(({ key, el }) => {
   if (!el) return;
   el.addEventListener("change", () => handleCategorySelectChange(key));
@@ -843,10 +852,12 @@ CATEGORY_FIELDS.forEach(({ key, el }) => {
 els.player1Select.addEventListener("change", handlePlayer1Change);
 els.player2Select.addEventListener("change", updateAutoPreview);
 els.predictBtn.addEventListener("click", handlePredict);
-els.loadFileBtn.addEventListener("click", handleManualFileLoad);
-els.clearLogsBtn.addEventListener("click", () => {
-  els.logs.textContent = "";
-});
+if (els.loadFileBtn) els.loadFileBtn.addEventListener("click", handleManualFileLoad);
+if (els.clearLogsBtn && els.logs) {
+  els.clearLogsBtn.addEventListener("click", () => {
+    els.logs.textContent = "";
+  });
+}
 
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
@@ -858,7 +869,8 @@ autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
 function readHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const epochValue = els.epochsInput?.value ?? DEFAULT_HYPERPARAMS.epochs ?? 6;
+  const epochs = clampInt(epochValue, 1, 200, 6);
   return {
     training: {
       epochs,
@@ -879,7 +891,7 @@ function clampInt(value, min, max, fallback) {
 }
 
 async function handleManualFileLoad() {
-  if (!els.fileInput.files || els.fileInput.files.length === 0) {
+  if (!els.fileInput || !els.fileInput.files || els.fileInput.files.length === 0) {
     return alert("Select a CSV file first.");
   }
   const file = els.fileInput.files[0];
