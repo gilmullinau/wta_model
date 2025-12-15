@@ -59,6 +59,9 @@ const els = {
   player2Pros: document.getElementById("player2Pros"),
   player2Cons: document.getElementById("player2Cons"),
   neutralInsights: document.getElementById("neutralInsights"),
+  friendlyProgress: document.getElementById("friendlyProgress"),
+  friendlySpinner: document.getElementById("friendlySpinner"),
+  friendlyStatusText: document.getElementById("friendlyStatusText"),
 };
 
 const CATEGORY_FIELDS = [
@@ -78,9 +81,15 @@ function log(msg) {
   els.logs.scrollTop = els.logs.scrollHeight;
 }
 
-function setModelStatus(text) {
+function setModelStatus(text, options = {}) {
   if (els.modelStatus) {
     els.modelStatus.textContent = text;
+  }
+  if (els.friendlyStatusText) {
+    els.friendlyStatusText.textContent = text;
+  }
+  if (els.friendlySpinner) {
+    els.friendlySpinner.style.visibility = options.busy ? "visible" : "hidden";
   }
 }
 
@@ -110,7 +119,7 @@ async function parseAndInit(text) {
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     loader = new DataLoader();
     dataset = await loader.loadCSVText(text);
-    els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
+    els.info.textContent = "Dataset loaded. Getting the model ready for picks…";
     log("Dataset loaded successfully.");
     enableTraining(false);
     buildPredictForm();
@@ -119,7 +128,7 @@ async function parseAndInit(text) {
     await ensureModelReady();
   } catch (err) {
     console.error(err);
-    els.info.textContent = `Dataset error: ${err.message}`;
+    els.info.textContent = "We hit a snag loading the data. Please try again.";
     log(`Dataset error: ${err.message}`);
     enableTraining(false);
   }
@@ -142,14 +151,14 @@ async function autoLoadCSV() {
   } catch (err) {
     console.error("❌ Auto-load failed:", err);
     log(`Auto-load failed: ${err.message}`);
-    els.info.textContent = "Failed to auto-load wta_data.csv from project root. Use manual upload below.";
+    els.info.textContent = "We couldn't fetch the data. Please refresh to try again.";
   }
 }
 
 async function ensureModelReady() {
   if (!dataset) return;
   try {
-    setModelStatus("Model: loading saved neural net…");
+    setModelStatus("Model: loading saved neural net…", { busy: true });
     const m = new ModelMLP(dataset.featureNames.length, {
       featureNames: dataset.featureNames,
       featureIndexMap: dataset.featureIndexMap,
@@ -159,20 +168,23 @@ async function ensureModelReady() {
     log("Model loaded from browser storage.");
     enableTraining(true);
     showPredictPanel(true);
-    setModelStatus("Model: ready (restored)");
+    setModelStatus("Model: ready — pick two players", { busy: false });
+    els.info.textContent = "Ready to predict. Pick two players below.";
     return;
   } catch (err) {
     console.warn("Starter model missing, training a fresh one.", err?.message);
   }
 
   try {
-    setModelStatus("Model: training starter model…");
+    setModelStatus("Model: training starter model…", { busy: true });
     await trainModel({ silent: true, autoSave: true, label: "Starter training" });
-    setModelStatus("Model: ready (auto-trained)");
+    setModelStatus("Model: ready — pick two players", { busy: false });
+    els.info.textContent = "Starter model trained. Pick two players below.";
   } catch (err) {
     console.error(err);
     log(`Starter training failed: ${err.message}`);
-    setModelStatus("Model: needs training");
+    setModelStatus("Model: needs training", { busy: false });
+    els.info.textContent = "Model unavailable. Please reload the page.";
     enableTraining(true);
   }
 }
