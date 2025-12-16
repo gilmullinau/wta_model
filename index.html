@@ -58,9 +58,14 @@
       <div class="scenario-note small">Scenario year fixed to <b>2025</b>. Conditions default to the most recent meeting but you can adjust.</div>
       <div id="matchSummary" class="small muted">Select two players to build a 2025 matchup from the dataset.</div>
 
-      <div class="player-card-grid" id="playerCards">
-        <div class="player-card" id="player1Card"></div>
-        <div class="player-card" id="player2Card"></div>
+      <div class="stats-toggle" id="statsToggleRow">
+        <button type="button" id="statsToggleBtn" aria-expanded="false">+ Show player stats</button>
+      </div>
+      <div class="player-stats collapsed" id="playerStatsSection">
+        <div class="player-card-grid" id="playerCards">
+          <div class="player-card" id="player1Card"></div>
+          <div class="player-card" id="player2Card"></div>
+        </div>
       </div>
 
       <div class="insight-grid">

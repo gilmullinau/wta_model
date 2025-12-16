@@ -239,6 +239,14 @@ label {
   margin: 12px 0;
 }
 
+.player-stats {
+  margin: 10px 0 6px;
+}
+
+.player-stats.collapsed {
+  display: none;
+}
+
 .player-card {
   background: #fff9d6;
   color: var(--fg);
@@ -266,6 +274,27 @@ label {
   border-bottom: none;
 }
 
+.stats-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.stats-toggle button {
+  background: #f6e48d;
+  border: 1px solid #e4c958;
+  color: #0d2d0a;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+.stats-toggle button:hover {
+  background: #f8eaa8;
+}
+
 #predictPanel {
   display: none;
 }
@@ -274,7 +303,7 @@ label {
   margin-top: 12px;
   font-weight: 700;
   font-size: 16px;
-  color: #dff9d8;
+  color: #0f5d2a;
 }
 
 .small {

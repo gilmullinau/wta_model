@@ -66,6 +66,8 @@ const els = {
   friendlyProgress: document.getElementById("friendlyProgress"),
   friendlySpinner: document.getElementById("friendlySpinner"),
   friendlyStatusText: document.getElementById("friendlyStatusText"),
+  statsToggleBtn: document.getElementById("statsToggleBtn"),
+  playerStatsSection: document.getElementById("playerStatsSection"),
 };
 
 const CATEGORY_FIELDS = [
@@ -107,6 +109,12 @@ function featureArraysEqual(a, b) {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function getModelInputDim(modelInstance = model) {
+  if (!modelInstance) return 0;
+  if (Number.isFinite(modelInstance.inputDim)) return modelInstance.inputDim;
+  return modelInstance.model?.inputs?.[0]?.shape?.[1] ?? 0;
 }
 
 function isModelCompatibleWithDataset(modelInstance) {
@@ -277,6 +285,7 @@ function resetAutoPredictPanel(message) {
   els.matchSummary.textContent = message;
   els.predictOut.textContent = "";
   renderPlayerCards(null);
+  setStatsCollapsed(true);
   setInsightList(els.player1Pros, [], "Waiting for Player 1");
   setInsightList(els.player1Cons, [], "—");
   setInsightList(els.player2Pros, [], "Waiting for Player 2");
@@ -642,6 +651,13 @@ function renderPlayerCards(payload) {
   renderCard(els.player2Card, "player2");
 }
 
+function setStatsCollapsed(collapsed = true) {
+  if (!els.playerStatsSection || !els.statsToggleBtn) return;
+  els.playerStatsSection.classList.toggle("collapsed", collapsed);
+  els.statsToggleBtn.textContent = collapsed ? "+ Show player stats" : "– Hide player stats";
+  els.statsToggleBtn.setAttribute("aria-expanded", (!collapsed).toString());
+}
+
 function describeMatchSummary(payload) {
   const { datasetMatch, players, playerSnapshots } = payload;
   const segments = [];
@@ -885,7 +901,18 @@ async function handlePredict(e) {
   }
   try {
     await ensurePredictCompatibility();
-    const vec = loader.vectorizeForPredict(currentAutoVector);
+    let vec = loader.vectorizeForPredict(currentAutoVector);
+    let expected = getModelInputDim(model);
+    if (expected && expected !== vec.length) {
+      await purgeSavedModel(`shape mismatch before predict (expected ${expected}, found ${vec.length})`);
+      await ensureModelReady();
+      if (!model) throw new Error("Model unavailable after refresh.");
+      vec = loader.vectorizeForPredict(currentAutoVector);
+      expected = getModelInputDim(model);
+      if (expected && expected !== vec.length) {
+        throw new Error(`Model schema mismatch persists (expected ${expected}, found ${vec.length}). Please reload.`);
+      }
+    }
     const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
     const yProb = model.predictProba(x);
     const prob = (await yProb.data())[0];
@@ -952,6 +979,12 @@ if (els.loadFileBtn) els.loadFileBtn.addEventListener("click", handleManualFileL
 if (els.clearLogsBtn && els.logs) {
   els.clearLogsBtn.addEventListener("click", () => {
     els.logs.textContent = "";
+  });
+}
+if (els.statsToggleBtn) {
+  els.statsToggleBtn.addEventListener("click", () => {
+    const collapsed = els.playerStatsSection?.classList.contains("collapsed");
+    setStatsCollapsed(!collapsed);
   });
 }
 
