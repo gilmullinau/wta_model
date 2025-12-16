@@ -8,10 +8,12 @@ const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const DEFAULT_HYPERPARAMS = {
-  batchSize: 256,
+  batchSize: 192,
   validationSplit: 0.2,
   hiddenUnits: [128, 64, 32],
   dropout: 0,
+  starterEpochs: 2,
+  starterSample: 900,
 };
 
 let loader = null;
@@ -179,10 +181,15 @@ async function ensureModelReady() {
   }
 
   try {
-    setModelStatus("Model: training starter model…", { busy: true });
-    await trainModel({ silent: true, autoSave: true, label: "Starter training" });
+    setModelStatus("Model: quick-start training…", { busy: true });
+    await trainModel({
+      silent: true,
+      autoSave: true,
+      label: "Starter training",
+      quickStarter: true,
+    });
     setModelStatus("Model: ready — pick two players", { busy: false });
-    els.info.textContent = "Starter model trained. Pick two players below.";
+    els.info.textContent = "Quick-start model loaded. Pick two players below.";
   } catch (err) {
     console.error(err);
     log(`Starter training failed: ${err.message}`);
@@ -676,6 +683,7 @@ async function trainModel(eventOrOpts) {
   const opts = isEvent ? {} : (eventOrOpts || {});
   const silent = Boolean(opts.silent);
   const label = opts.label || "Training";
+  const quickStarter = Boolean(opts.quickStarter);
   if (!dataset) {
     if (!silent) alert("Dataset not loaded yet.");
     return;
@@ -688,15 +696,34 @@ async function trainModel(eventOrOpts) {
     featureIndexMap: dataset.featureIndexMap,
   });
   model.build();
-  log(`${label} started...`);
+  log(`${label} started${quickStarter ? " (quick sample)" : ""}...`);
   setModelStatus(`${label}: running`);
   const losses = [], valAcc = [];
   enableTraining(false);
+  const cleanup = [];
   try {
-    await model.train(dataset.X_train, dataset.y_train, {
-      epochs: hyper.training.epochs,
-      batchSize: hyper.training.batchSize,
-      validationSplit: hyper.training.validationSplit,
+    const sampleSize = quickStarter
+      ? Math.min(DEFAULT_HYPERPARAMS.starterSample, dataset.X_train.shape[0])
+      : dataset.X_train.shape[0];
+    const trainXs = quickStarter
+      ? tf.tidy(() => {
+          const t = dataset.X_train.slice([0, 0], [sampleSize, dataset.X_train.shape[1]]);
+          cleanup.push(t);
+          return t;
+        })
+      : dataset.X_train;
+    const trainYs = quickStarter
+      ? tf.tidy(() => {
+          const t = dataset.y_train.slice([0, 0], [sampleSize, 1]);
+          cleanup.push(t);
+          return t;
+        })
+      : dataset.y_train;
+
+    await model.train(trainXs, trainYs, {
+      epochs: quickStarter ? DEFAULT_HYPERPARAMS.starterEpochs : hyper.training.epochs,
+      batchSize: quickStarter ? Math.min(DEFAULT_HYPERPARAMS.batchSize, sampleSize) : hyper.training.batchSize,
+      validationSplit: quickStarter ? 0.1 : hyper.training.validationSplit,
       onEpochEnd: (epoch, logs) => {
         const val = logs.val_acc ?? logs.val_accuracy ?? 0;
         log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
@@ -722,6 +749,7 @@ async function trainModel(eventOrOpts) {
     setModelStatus("Model: training failed");
     throw err;
   } finally {
+    cleanup?.forEach?.((t) => t.dispose?.());
     enableTraining(true);
   }
 }
