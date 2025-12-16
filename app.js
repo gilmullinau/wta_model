@@ -24,6 +24,8 @@ let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
 
+const SAVED_MODEL_KEY = "localstorage://wta-mlp-v2";
+
 const els = {
   trainBtn: document.getElementById("trainBtn"),
   evalBtn: document.getElementById("evalBtn"),
@@ -98,6 +100,38 @@ function setModelStatus(text, options = {}) {
   }
 }
 
+function featureArraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function isModelCompatibleWithDataset(modelInstance) {
+  if (!modelInstance || !dataset) return false;
+  const expectedLen = dataset.featureNames?.length || 0;
+  const loadedLen = Number.isFinite(modelInstance.inputDim)
+    ? modelInstance.inputDim
+    : (modelInstance.model?.inputs?.[0]?.shape?.[1] || 0);
+  if (expectedLen !== loadedLen) return false;
+  if (Array.isArray(modelInstance.featureNames) && modelInstance.featureNames.length) {
+    return featureArraysEqual(modelInstance.featureNames, dataset.featureNames);
+  }
+  return true;
+}
+
+async function purgeSavedModel(reason = "") {
+  try {
+    await tf.io.removeModel(SAVED_MODEL_KEY);
+    localStorage.removeItem("wta-mlp-v2-meta");
+    if (reason) log(`Cleared saved model: ${reason}`); else log("Cleared saved model.");
+  } catch (err) {
+    console.warn("Failed to purge saved model", err);
+  }
+}
+
 function enableTraining(enabled) {
   if (els.trainBtn) els.trainBtn.disabled = !enabled;
   if (els.evalBtn) els.evalBtn.disabled = !enabled || !model;
@@ -169,6 +203,13 @@ async function ensureModelReady() {
       featureIndexMap: dataset.featureIndexMap,
     });
     await m.load();
+    if (!isModelCompatibleWithDataset(m)) {
+      const expected = dataset.featureNames.length;
+      const found = m?.inputDim ?? "unknown";
+      await purgeSavedModel(`schema mismatch (expected ${expected} features, found ${found})`);
+      m.dispose();
+      throw new Error("Saved model incompatible with current dataset schema.");
+    }
     model = m;
     log("Model loaded from browser storage.");
     enableTraining(true);
@@ -819,6 +860,10 @@ function initTennisBackground() {
 async function handlePredict(e) {
   e.preventDefault();
   if (!model || !loader) return alert("Train or load a model first.");
+  if (!isModelCompatibleWithDataset(model)) {
+    alert("Saved model schema mismatched current dataset. Please retrain.");
+    return;
+  }
   if (!currentAutoVector) {
     alert("Select two players with available matchup data first.");
     return;
@@ -859,6 +904,13 @@ if (els.loadModelBtn) {
         featureIndexMap: dataset?.featureIndexMap || {},
       });
       await m.load();
+      if (dataset && !isModelCompatibleWithDataset(m)) {
+        const expected = dataset.featureNames.length;
+        const found = m?.inputDim ?? "unknown";
+        await purgeSavedModel(`schema mismatch (expected ${expected} features, found ${found})`);
+        m.dispose();
+        throw new Error("Saved model incompatible with current dataset schema.");
+      }
       model = m;
       log("Model loaded from browser storage.");
       showPredictPanel(true);
