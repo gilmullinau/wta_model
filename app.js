@@ -44,9 +44,6 @@ const els = {
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
-  playerCards: document.getElementById("playerCards"),
-  player1Card: document.getElementById("player1Card"),
-  player2Card: document.getElementById("player2Card"),
   fileInput: document.getElementById("fileInput"),
   loadFileBtn: document.getElementById("loadFileBtn"),
   epochsInput: document.getElementById("epochsInput"),
@@ -66,8 +63,6 @@ const els = {
   friendlyProgress: document.getElementById("friendlyProgress"),
   friendlySpinner: document.getElementById("friendlySpinner"),
   friendlyStatusText: document.getElementById("friendlyStatusText"),
-  statsToggleBtn: document.getElementById("statsToggleBtn"),
-  playerStatsSection: document.getElementById("playerStatsSection"),
 };
 
 const CATEGORY_FIELDS = [
@@ -284,8 +279,6 @@ function buildPredictForm() {
 function resetAutoPredictPanel(message) {
   els.matchSummary.textContent = message;
   els.predictOut.textContent = "";
-  renderPlayerCards(null);
-  setStatsCollapsed(true);
   setInsightList(els.player1Pros, [], "Waiting for Player 1");
   setInsightList(els.player1Cons, [], "—");
   setInsightList(els.player2Pros, [], "Waiting for Player 2");
@@ -473,7 +466,6 @@ function updateAutoPreview() {
 }
 
 function renderFriendlyInsights(payload) {
-  renderPlayerCards(payload);
   if (!payload) return;
   const { pros1, cons1, pros2, cons2, neutral } = buildInsights(payload);
   setInsightList(els.player1Pros, pros1, "Waiting for Player 1");
@@ -481,35 +473,6 @@ function renderFriendlyInsights(payload) {
   setInsightList(els.player2Pros, pros2, "Waiting for Player 2");
   setInsightList(els.player2Cons, cons2, "No obvious risks");
   setInsightList(els.neutralInsights, neutral, "Pick players to see the matchup story.");
-}
-
-function formatFeatureValue(key, value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  if (key === "year") return `${value} (scenario year)`;
-  if (key === "age") return `${Number(value).toFixed(1)} yrs`;
-  if (key === "rank_diff") {
-    const p1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const p2 = currentAutoPayload?.players?.player2 || "Player 2";
-    return `${Number(value).toFixed(0)} (${p2} rank − ${p1} rank)`;
-  }
-  if (key === "pts_diff") {
-    const p1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const p2 = currentAutoPayload?.players?.player2 || "Player 2";
-    return `${Number(value).toFixed(0)} (${p1} pts − ${p2} pts from last meeting)`;
-  }
-  if (key === "last_winner") {
-    const label = currentAutoPayload?.players?.player1 || "Player 1";
-    return `${value} (${value === 1 ? `${label} won last` : `${label} did not win last`})`;
-  }
-  if (key === "recent5" || key === "recent10") {
-    return `${formatPercent(value)} win rate`;
-  }
-  if (key?.startsWith("fatigue")) {
-    return `${Number(value).toFixed(1)} workload index`;
-  }
-  const abs = Math.abs(value);
-  const decimals = abs >= 100 ? 1 : 3;
-  return Number(value).toFixed(decimals);
 }
 
 function formatAgeGroup(value) {
@@ -619,43 +582,6 @@ function buildInsights(payload) {
   }
 
   return { pros1, cons1, pros2, cons2, neutral };
-}
-
-function renderPlayerCards(payload) {
-  if (!els.playerCards || !els.player1Card || !els.player2Card) return;
-  if (!payload) {
-    els.player1Card.innerHTML = "<div class=\"small muted\">Player 1 stats will appear here.</div>";
-    els.player2Card.innerHTML = "<div class=\"small muted\">Player 2 stats will appear here.</div>";
-    return;
-  }
-  const { players = {}, playerFeatures = {} } = payload;
-  const renderCard = (cardEl, nameKey) => {
-    const name = players[nameKey] || nameKey;
-    const stats = playerFeatures[name] || {};
-    const rows = [
-      `<div class="card-title">${escapeHtml(name || "—")}</div>`,
-      `<div class="stat-line"><span>Age</span><span>${formatFeatureValue("age", stats.age)}</span></div>`,
-      `<div class="stat-line"><span>Age group</span><span>${formatAgeGroup(stats.ageGroup)}</span></div>`,
-      `<div class="stat-line"><span>Form streak</span><span>${formatFeatureValue("streak", stats.streak)}</span></div>`,
-      `<div class="stat-line"><span>Momentum</span><span>${formatFeatureValue("streak_value", stats.streakValue)}</span></div>`,
-      `<div class="stat-line"><span>Win rate (5)</span><span>${formatFeatureValue("recent5", stats.recent5)}</span></div>`,
-      `<div class="stat-line"><span>Win rate (10)</span><span>${formatFeatureValue("recent10", stats.recent10)}</span></div>`,
-      `<div class="stat-line"><span>Fatigue 7d</span><span>${formatFeatureValue("fatigue7", stats.fatigue7)}</span></div>`,
-      `<div class="stat-line"><span>Fatigue 14d</span><span>${formatFeatureValue("fatigue14", stats.fatigue14)}</span></div>`,
-      `<div class="stat-line"><span>Fatigue 30d</span><span>${formatFeatureValue("fatigue30", stats.fatigue30)}</span></div>`,
-      `<div class="stat-line"><span>Surface trend</span><span>${formatFeatureValue("surface_trend", stats.surfaceTrend)}</span></div>`,
-    ];
-    cardEl.innerHTML = rows.join("");
-  };
-  renderCard(els.player1Card, "player1");
-  renderCard(els.player2Card, "player2");
-}
-
-function setStatsCollapsed(collapsed = true) {
-  if (!els.playerStatsSection || !els.statsToggleBtn) return;
-  els.playerStatsSection.classList.toggle("collapsed", collapsed);
-  els.statsToggleBtn.textContent = collapsed ? "+ Show player stats" : "– Hide player stats";
-  els.statsToggleBtn.setAttribute("aria-expanded", (!collapsed).toString());
 }
 
 function describeMatchSummary(payload) {
@@ -981,13 +907,6 @@ if (els.clearLogsBtn && els.logs) {
     els.logs.textContent = "";
   });
 }
-if (els.statsToggleBtn) {
-  els.statsToggleBtn.addEventListener("click", () => {
-    const collapsed = els.playerStatsSection?.classList.contains("collapsed");
-    setStatsCollapsed(!collapsed);
-  });
-}
-
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
 enableTraining(false);

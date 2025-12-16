@@ -232,69 +232,6 @@ label {
   margin-bottom: 6px;
 }
 
-.player-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-  margin: 12px 0;
-}
-
-.player-stats {
-  margin: 10px 0 6px;
-}
-
-.player-stats.collapsed {
-  display: none;
-}
-
-.player-card {
-  background: #fff9d6;
-  color: var(--fg);
-  border: 1px solid #f0d97a;
-  border-radius: 12px;
-  padding: 10px 12px;
-  min-height: 180px;
-  box-shadow: var(--shadow);
-}
-
-.player-card .card-title {
-  font-weight: 700;
-  margin-bottom: 6px;
-}
-
-.player-card .stat-line {
-  display: flex;
-  justify-content: space-between;
-  font-size: 13px;
-  padding: 4px 0;
-  border-bottom: 1px solid rgba(20, 35, 56, 0.08);
-}
-
-.player-card .stat-line:last-child {
-  border-bottom: none;
-}
-
-.stats-toggle {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 6px;
-}
-
-.stats-toggle button {
-  background: #f6e48d;
-  border: 1px solid #e4c958;
-  color: #0d2d0a;
-  padding: 6px 10px;
-  border-radius: 10px;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: var(--shadow);
-}
-
-.stats-toggle button:hover {
-  background: #f8eaa8;
-}
-
 #predictPanel {
   display: none;
 }
@@ -302,8 +239,8 @@ label {
 .predict-result {
   margin-top: 12px;
   font-weight: 700;
-  font-size: 16px;
-  color: #0f5d2a;
+  font-size: 22px;
+  color: #0b4a21;
 }
 
 .small {
@@ -312,7 +249,7 @@ label {
 }
 
 .muted {
-  color: rgba(233, 238, 248, 0.8);
+  color: rgba(20, 35, 56, 0.64);
 }
 
 .footer {
