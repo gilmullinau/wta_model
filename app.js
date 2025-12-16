@@ -122,6 +122,19 @@ function isModelCompatibleWithDataset(modelInstance) {
   return true;
 }
 
+async function ensurePredictCompatibility() {
+  if (!dataset) throw new Error("Dataset not loaded.");
+  if (model && isModelCompatibleWithDataset(model)) return true;
+
+  await purgeSavedModel("schema mismatch before prediction");
+  await ensureModelReady();
+
+  if (!model || !isModelCompatibleWithDataset(model)) {
+    throw new Error("Model schema still mismatched after refresh. Please reload the page.");
+  }
+  return true;
+}
+
 async function purgeSavedModel(reason = "") {
   try {
     await tf.io.removeModel(SAVED_MODEL_KEY);
@@ -210,6 +223,9 @@ async function ensureModelReady() {
       m.dispose();
       throw new Error("Saved model incompatible with current dataset schema.");
     }
+    m.inputDim = dataset.featureNames.length;
+    m.featureNames = dataset.featureNames.slice();
+    m.featureIndexMap = { ...dataset.featureIndexMap };
     model = m;
     log("Model loaded from browser storage.");
     enableTraining(true);
@@ -737,6 +753,9 @@ async function trainModel(eventOrOpts) {
     featureIndexMap: dataset.featureIndexMap,
   });
   model.build();
+  model.inputDim = dataset.featureNames.length;
+  model.featureNames = dataset.featureNames.slice();
+  model.featureIndexMap = { ...dataset.featureIndexMap };
   log(`${label} started${quickStarter ? " (quick sample)" : ""}...`);
   setModelStatus(`${label}: running`);
   const losses = [], valAcc = [];
@@ -859,16 +878,13 @@ function initTennisBackground() {
 
 async function handlePredict(e) {
   e.preventDefault();
-  if (!model || !loader) return alert("Train or load a model first.");
-  if (!isModelCompatibleWithDataset(model)) {
-    alert("Saved model schema mismatched current dataset. Please retrain.");
-    return;
-  }
+  if (!loader || !dataset) return alert("Load data first.");
   if (!currentAutoVector) {
     alert("Select two players with available matchup data first.");
     return;
   }
   try {
+    await ensurePredictCompatibility();
     const vec = loader.vectorizeForPredict(currentAutoVector);
     const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
     const yProb = model.predictProba(x);
