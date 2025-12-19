@@ -8,10 +8,12 @@ const tf = window.tf; // Use global TensorFlow.js loaded via <script>
 const LOG_MAX_LINES = 400;
 const SCENARIO_YEAR = 2025;
 const DEFAULT_HYPERPARAMS = {
-  batchSize: 256,
+  batchSize: 192,
   validationSplit: 0.2,
-  hiddenUnits: [128, 64],
-  dropout: 0.3,
+  hiddenUnits: [128, 64, 32],
+  dropout: 0,
+  starterEpochs: 2,
+  starterSample: 900,
 };
 
 let loader = null;
@@ -21,6 +23,8 @@ let lossChart = null;
 let cmChart = null;
 let currentAutoVector = null;
 let currentAutoPayload = null;
+
+const SAVED_MODEL_KEY = "localstorage://wta-mlp-v2";
 
 const els = {
   trainBtn: document.getElementById("trainBtn"),
@@ -37,7 +41,6 @@ const els = {
   surfaceSelect: document.getElementById("surfaceSelect"),
   courtSelect: document.getElementById("courtSelect"),
   roundSelect: document.getElementById("roundSelect"),
-  featureTableBody: document.getElementById("featureTableBody"),
   matchSummary: document.getElementById("matchSummary"),
   predictBtn: document.getElementById("predictBtn"),
   predictOut: document.getElementById("predictOut"),
@@ -50,6 +53,16 @@ const els = {
   layer2Input: document.getElementById("layer2Units"),
   dropoutInput: document.getElementById("dropoutRate"),
   clearLogsBtn: document.getElementById("clearLogsBtn"),
+  modelStatus: document.getElementById("modelStatus"),
+  tennisBg: document.getElementById("tennisBg"),
+  player1Pros: document.getElementById("player1Pros"),
+  player1Cons: document.getElementById("player1Cons"),
+  player2Pros: document.getElementById("player2Pros"),
+  player2Cons: document.getElementById("player2Cons"),
+  neutralInsights: document.getElementById("neutralInsights"),
+  friendlyProgress: document.getElementById("friendlyProgress"),
+  friendlySpinner: document.getElementById("friendlySpinner"),
+  friendlyStatusText: document.getElementById("friendlyStatusText"),
 };
 
 const CATEGORY_FIELDS = [
@@ -60,19 +73,85 @@ const CATEGORY_FIELDS = [
 
 function log(msg) {
   const time = new Date().toLocaleTimeString();
-  els.logs.textContent += `[${time}] ${msg}\n`;
-  const lines = els.logs.textContent.split("\n");
-  if (lines.length > LOG_MAX_LINES) {
-    const trimmed = lines.slice(-LOG_MAX_LINES).join("\n");
-    els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
+  if (els.logs) {
+    els.logs.textContent += `[${time}] ${msg}\n`;
+    const lines = els.logs.textContent.split("\n");
+    if (lines.length > LOG_MAX_LINES) {
+      const trimmed = lines.slice(-LOG_MAX_LINES).join("\n");
+      els.logs.textContent = trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
+    }
+    els.logs.scrollTop = els.logs.scrollHeight;
   }
-  els.logs.scrollTop = els.logs.scrollHeight;
+  console.log(`[${time}] ${msg}`);
+}
+
+function setModelStatus(text, options = {}) {
+  if (els.modelStatus) {
+    els.modelStatus.textContent = text;
+  }
+  if (els.friendlyStatusText) {
+    els.friendlyStatusText.textContent = text;
+  }
+  if (els.friendlySpinner) {
+    els.friendlySpinner.style.visibility = options.busy ? "visible" : "hidden";
+  }
+}
+
+function featureArraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function getModelInputDim(modelInstance = model) {
+  if (!modelInstance) return 0;
+  if (Number.isFinite(modelInstance.inputDim)) return modelInstance.inputDim;
+  return modelInstance.model?.inputs?.[0]?.shape?.[1] ?? 0;
+}
+
+function isModelCompatibleWithDataset(modelInstance) {
+  if (!modelInstance || !dataset) return false;
+  const expectedLen = dataset.featureNames?.length || 0;
+  const loadedLen = Number.isFinite(modelInstance.inputDim)
+    ? modelInstance.inputDim
+    : (modelInstance.model?.inputs?.[0]?.shape?.[1] || 0);
+  if (expectedLen !== loadedLen) return false;
+  if (Array.isArray(modelInstance.featureNames) && modelInstance.featureNames.length) {
+    return featureArraysEqual(modelInstance.featureNames, dataset.featureNames);
+  }
+  return true;
+}
+
+async function ensurePredictCompatibility() {
+  if (!dataset) throw new Error("Dataset not loaded.");
+  if (model && isModelCompatibleWithDataset(model)) return true;
+
+  await purgeSavedModel("schema mismatch before prediction");
+  await ensureModelReady();
+
+  if (!model || !isModelCompatibleWithDataset(model)) {
+    throw new Error("Model schema still mismatched after refresh. Please reload the page.");
+  }
+  return true;
+}
+
+async function purgeSavedModel(reason = "") {
+  try {
+    await tf.io.removeModel(SAVED_MODEL_KEY);
+    localStorage.removeItem("wta-mlp-v2-meta");
+    if (reason) log(`Cleared saved model: ${reason}`); else log("Cleared saved model.");
+  } catch (err) {
+    console.warn("Failed to purge saved model", err);
+  }
 }
 
 function enableTraining(enabled) {
-  els.trainBtn.disabled = !enabled;
-  els.evalBtn.disabled = !enabled || !model;
-  els.saveBtn.disabled = !enabled || !model;
+  if (els.trainBtn) els.trainBtn.disabled = !enabled;
+  if (els.evalBtn) els.evalBtn.disabled = !enabled || !model;
+  if (els.saveBtn) els.saveBtn.disabled = !enabled || !model;
 }
 
 function showPredictPanel(show) {
@@ -95,15 +174,16 @@ async function parseAndInit(text) {
     if (cmChart) { cmChart.destroy(); cmChart = null; }
     loader = new DataLoader();
     dataset = await loader.loadCSVText(text);
-    els.info.textContent = `Dataset loaded — Train: ${dataset.X_train.shape[0]}, Test: ${dataset.X_test.shape[0]}, Features: ${dataset.featureNames.length}`;
+    els.info.textContent = "Dataset loaded. Getting the model ready for picks…";
     log("Dataset loaded successfully.");
-    enableTraining(true);
+    enableTraining(false);
     buildPredictForm();
-    els.saveBtn.disabled = true;
+    if (els.saveBtn) els.saveBtn.disabled = true;
     showPredictPanel(false);
+    await ensureModelReady();
   } catch (err) {
     console.error(err);
-    els.info.textContent = `Dataset error: ${err.message}`;
+    els.info.textContent = "We hit a snag loading the data. Please try again.";
     log(`Dataset error: ${err.message}`);
     enableTraining(false);
   }
@@ -126,7 +206,56 @@ async function autoLoadCSV() {
   } catch (err) {
     console.error("❌ Auto-load failed:", err);
     log(`Auto-load failed: ${err.message}`);
-    els.info.textContent = "Failed to auto-load wta_data.csv from project root. Use manual upload below.";
+    els.info.textContent = "We couldn't fetch the data. Please refresh to try again.";
+  }
+}
+
+async function ensureModelReady() {
+  if (!dataset) return;
+  try {
+    setModelStatus("Model: loading saved neural net…", { busy: true });
+    const m = new ModelMLP(dataset.featureNames.length, {
+      featureNames: dataset.featureNames,
+      featureIndexMap: dataset.featureIndexMap,
+    });
+    await m.load();
+    if (!isModelCompatibleWithDataset(m)) {
+      const expected = dataset.featureNames.length;
+      const found = m?.inputDim ?? "unknown";
+      await purgeSavedModel(`schema mismatch (expected ${expected} features, found ${found})`);
+      m.dispose();
+      throw new Error("Saved model incompatible with current dataset schema.");
+    }
+    m.inputDim = dataset.featureNames.length;
+    m.featureNames = dataset.featureNames.slice();
+    m.featureIndexMap = { ...dataset.featureIndexMap };
+    model = m;
+    log("Model loaded from browser storage.");
+    enableTraining(true);
+    showPredictPanel(true);
+    setModelStatus("Model: ready — pick two players", { busy: false });
+    els.info.textContent = "Ready to predict. Pick two players below.";
+    return;
+  } catch (err) {
+    console.warn("Starter model missing, training a fresh one.", err?.message);
+  }
+
+  try {
+    setModelStatus("Model: quick-start training…", { busy: true });
+    await trainModel({
+      silent: true,
+      autoSave: true,
+      label: "Starter training",
+      quickStarter: true,
+    });
+    setModelStatus("Model: ready — pick two players", { busy: false });
+    els.info.textContent = "Quick-start model loaded. Pick two players below.";
+  } catch (err) {
+    console.error(err);
+    log(`Starter training failed: ${err.message}`);
+    setModelStatus("Model: needs training", { busy: false });
+    els.info.textContent = "Model unavailable. Please reload the page.";
+    enableTraining(true);
   }
 }
 
@@ -149,8 +278,12 @@ function buildPredictForm() {
 
 function resetAutoPredictPanel(message) {
   els.matchSummary.textContent = message;
-  els.featureTableBody.innerHTML = "";
   els.predictOut.textContent = "";
+  setInsightList(els.player1Pros, [], "Waiting for Player 1");
+  setInsightList(els.player1Cons, [], "—");
+  setInsightList(els.player2Pros, [], "Waiting for Player 2");
+  setInsightList(els.player2Cons, [], "—");
+  setInsightList(els.neutralInsights, [], "Pick players to see the matchup story.");
   currentAutoVector = null;
   currentAutoPayload = null;
   els.predictBtn.disabled = true;
@@ -229,7 +362,7 @@ function handleCategorySelectChange(column) {
   currentAutoPayload.categorical[column] = value;
   if (currentAutoPayload.vectorInput) currentAutoPayload.vectorInput[column] = value;
   currentAutoVector[column] = value;
-  renderAutoFeatureTable(currentAutoPayload);
+  renderFriendlyInsights(currentAutoPayload);
 }
 
 function populatePlayer2Options(player1) {
@@ -263,6 +396,15 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function setInsightList(el, items, placeholder = "") {
+  if (!el) return;
+  if (!items || items.length === 0) {
+    el.innerHTML = placeholder ? `<li>${escapeHtml(placeholder)}</li>` : "";
+    return;
+  }
+  el.innerHTML = items.map((text) => `<li>${escapeHtml(text)}</li>`).join("");
 }
 
 function handlePlayer1Change() {
@@ -309,13 +451,10 @@ function updateAutoPreview() {
     resetAutoPredictPanel("No matchup with these players was found in the dataset. Try another pairing.");
     return;
   }
-  payload.numeric.year = SCENARIO_YEAR;
-  payload.vectorInput.year = SCENARIO_YEAR;
   currentAutoPayload = payload;
   currentAutoVector = { ...payload.vectorInput };
-  currentAutoVector.year = SCENARIO_YEAR;
   applyCategoryDefaultsFromPayload(currentAutoPayload);
-  renderAutoFeatureTable(currentAutoPayload);
+  renderFriendlyInsights(currentAutoPayload);
   els.matchSummary.textContent = describeMatchSummary(currentAutoPayload);
   if (!model) {
     els.predictBtn.disabled = true;
@@ -326,47 +465,130 @@ function updateAutoPreview() {
   }
 }
 
-function renderAutoFeatureTable(payload) {
-  const rows = [];
-  loader.numericCols.forEach((col) => {
-    const value = payload.numeric[col];
-    rows.push(`<tr><td>${col}</td><td>${formatFeatureValue(col, value)}</td></tr>`);
-  });
-  loader.categoricalCols.forEach((col) => {
-    const value = payload.categorical[col] ?? "";
-    const display = value ? escapeHtml(value) : "—";
-    rows.push(`<tr><td>${col}</td><td>${display}</td></tr>`);
-  });
-  els.featureTableBody.innerHTML = rows.join("");
+function renderFriendlyInsights(payload) {
+  if (!payload) return;
+  const { pros1, cons1, pros2, cons2, neutral } = buildInsights(payload);
+  setInsightList(els.player1Pros, pros1, "Waiting for Player 1");
+  setInsightList(els.player1Cons, cons1, "No obvious risks");
+  setInsightList(els.player2Pros, pros2, "Waiting for Player 2");
+  setInsightList(els.player2Cons, cons2, "No obvious risks");
+  setInsightList(els.neutralInsights, neutral, "Pick players to see the matchup story.");
 }
 
-function formatFeatureValue(key, value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  if (key === "year") return `${value} (scenario year)`;
-  if (key === "rank_diff") {
-    const p1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const p2 = currentAutoPayload?.players?.player2 || "Player 2";
-    return `${Number(value).toFixed(0)} (${p2} rank − ${p1} rank)`;
+function formatAgeGroup(value) {
+  if (!value) return "—";
+  const map = {
+    lt20: "<20",
+    "20_24": "20–24",
+    "25_29": "25–29",
+    "30_34": "30–34",
+    "35_plus": "35+",
+  };
+  return map[value] || escapeHtml(value.toString());
+}
+
+function buildInsights(payload) {
+  const numeric = payload?.numeric || {};
+  const ageGroups = payload?.ageGroups || {};
+  const players = payload?.players || {};
+  const p1 = players.player1 || "Player 1";
+  const p2 = players.player2 || "Player 2";
+
+  const pros1 = [], pros2 = [], cons1 = [], cons2 = [], neutral = [];
+
+  const rankDiff = numeric.rank_diff;
+  if (isFiniteNumber(rankDiff)) {
+    if (rankDiff < -2) {
+      pros1.push(`${p1} is ranked ${Math.abs(rankDiff).toFixed(0)} spots higher than ${p2}.`);
+      cons2.push(`${p2} trails in ranking for now.`);
+    } else if (rankDiff > 2) {
+      pros2.push(`${p2} holds a ranking edge of ${Math.abs(rankDiff).toFixed(0)} spots.`);
+      cons1.push(`${p1} will need to punch above ranking.`);
+    } else neutral.push("Rankings are very close on paper.");
   }
-  if (key === "pts_diff") {
-    const p1 = currentAutoPayload?.players?.player1 || "Player 1";
-    const p2 = currentAutoPayload?.players?.player2 || "Player 2";
-    return `${Number(value).toFixed(0)} (${p1} pts − ${p2} pts from last meeting)`;
+
+  const pointsDiff = numeric.pts_diff;
+  if (isFiniteNumber(pointsDiff)) {
+    const edge = Math.abs(pointsDiff);
+    if (edge >= 25) {
+      const target = pointsDiff >= 0 ? pros1 : pros2;
+      target.push(`Recent points tilt toward ${pointsDiff >= 0 ? p1 : p2} by about ${edge.toFixed(0)}.`);
+    }
   }
-  if (key === "last_winner") {
-    const label = currentAutoPayload?.players?.player1 || "Player 1";
-    return `${value} (${value === 1 ? `${label} won last` : `${label} did not win last`})`;
+
+  if (numeric.last_winner === 1) pros1.push(`${p1} won the last meeting.`);
+  if (numeric.last_winner === 0) pros2.push(`${p2} won the last meeting.`);
+
+  if (isFiniteNumber(numeric.h2h_advantage)) {
+    if (numeric.h2h_advantage > 0) pros1.push(`${p1} leads the head-to-head record.`);
+    else if (numeric.h2h_advantage < 0) pros2.push(`${p2} leads the head-to-head record.`);
   }
-  const abs = Math.abs(value);
-  const decimals = abs >= 100 ? 1 : 3;
-  return Number(value).toFixed(decimals);
+
+  const win5_1 = numeric.recent_win_rate_5_1;
+  const win5_2 = numeric.recent_win_rate_5_2;
+  if (isFiniteNumber(win5_1) && isFiniteNumber(win5_2)) {
+    const diff = win5_1 - win5_2;
+    if (Math.abs(diff) >= 0.05) {
+      const target = diff > 0 ? pros1 : pros2;
+      target.push(`${diff > 0 ? p1 : p2} has the hotter 5-match win rate (${formatPercent(Math.max(win5_1, win5_2))}).`);
+    }
+  }
+
+  const win10_1 = numeric.recent_win_rate_10_1;
+  const win10_2 = numeric.recent_win_rate_10_2;
+  if (isFiniteNumber(win10_1) && isFiniteNumber(win10_2)) {
+    const diff = win10_1 - win10_2;
+    if (Math.abs(diff) >= 0.05) {
+      const target = diff > 0 ? pros1 : pros2;
+      target.push(`Over 10 matches, ${diff > 0 ? p1 : p2} has steadier results (${formatPercent(Math.max(win10_1, win10_2))}).`);
+    }
+  }
+
+  const streakValue1 = numeric.streak_value_1;
+  const streakValue2 = numeric.streak_value_2;
+  if (isFiniteNumber(streakValue1) && isFiniteNumber(streakValue2) && Math.abs(streakValue1 - streakValue2) >= 1) {
+    const target = streakValue1 > streakValue2 ? pros1 : pros2;
+    target.push(`${streakValue1 > streakValue2 ? p1 : p2} comes in on the stronger streak.`);
+  }
+
+  const fatigue1 = average([numeric.fatigue_7d_1, numeric.fatigue_14d_1, numeric.fatigue_30d_1]);
+  const fatigue2 = average([numeric.fatigue_7d_2, numeric.fatigue_14d_2, numeric.fatigue_30d_2]);
+  if (isFiniteNumber(fatigue1) && isFiniteNumber(fatigue2)) {
+    const diff = fatigue2 - fatigue1;
+    if (diff > 1) {
+      pros1.push(`${p1} looks fresher based on recent workload.`);
+      cons2.push(`${p2} has logged more minutes recently.`);
+    } else if (diff < -1) {
+      pros2.push(`${p2} looks fresher based on recent workload.`);
+      cons1.push(`${p1} has logged more minutes recently.`);
+    }
+  }
+
+  if (isFiniteNumber(numeric.surface_trend_1) && isFiniteNumber(numeric.surface_trend_2)) {
+    const diff = numeric.surface_trend_1 - numeric.surface_trend_2;
+    if (diff > 0.1) pros1.push(`${p1} has better momentum on this surface.`);
+    else if (diff < -0.1) pros2.push(`${p2} has better momentum on this surface.`);
+    else neutral.push("Surface trends are evenly matched.");
+  }
+
+  if (ageGroups.age_group_1 || ageGroups.age_group_2) {
+    neutral.push(`${p1} age group: ${formatAgeGroup(ageGroups.age_group_1)}; ${p2} age group: ${formatAgeGroup(ageGroups.age_group_2)}.`);
+  }
+
+  const oddDiff = numeric.odd_diff;
+  if (isFiniteNumber(oddDiff) && Math.abs(oddDiff) > 0.05) {
+    const fav = oddDiff < 0 ? p1 : p2;
+    neutral.push(`${fav} entered the last matchup as the favored player.`);
+  }
+
+  return { pros1, cons1, pros2, cons2, neutral };
 }
 
 function describeMatchSummary(payload) {
   const { datasetMatch, players, playerSnapshots } = payload;
   const segments = [];
   if (players?.player1 && players?.player2) {
-    segments.push(`${players.player1} vs ${players.player2} planned for ${SCENARIO_YEAR}.`);
+    segments.push(`${players.player1} vs ${players.player2} set for ${SCENARIO_YEAR}.`);
   } else {
     segments.push(`Scenario year fixed to ${SCENARIO_YEAR}.`);
   }
@@ -406,8 +628,7 @@ function describeMatchSummary(payload) {
     if (snapshotLine) segments.push(snapshotLine);
   }
 
-  segments.push("Points difference and last_winner come from the most recent head-to-head meeting.");
-  segments.push("Adjust surface, court, and round selectors to reflect your planned conditions.");
+  segments.push("Surface, court, and round default to the most recent clash — adjust them for your scenario.");
   return segments.join(" ");
 }
 
@@ -444,20 +665,67 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-async function trainModel() {
-  if (!dataset) return alert("Dataset not loaded yet.");
+function formatPercent(value) {
+  if (!isFiniteNumber(value)) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
+function average(values = []) {
+  const nums = values.filter(isFiniteNumber);
+  if (nums.length === 0) return NaN;
+  return nums.reduce((sum, v) => sum + v, 0) / nums.length;
+}
+
+async function trainModel(eventOrOpts) {
+  const isEvent = eventOrOpts && typeof eventOrOpts.preventDefault === "function";
+  if (isEvent) eventOrOpts.preventDefault();
+  const opts = isEvent ? {} : (eventOrOpts || {});
+  const silent = Boolean(opts.silent);
+  const label = opts.label || "Training";
+  const quickStarter = Boolean(opts.quickStarter);
+  if (!dataset) {
+    if (!silent) alert("Dataset not loaded yet.");
+    return;
+  }
   if (model) model.dispose();
   const hyper = readHyperparameters();
-  model = new ModelMLP(dataset.featureNames.length, hyper.architecture);
+  model = new ModelMLP(dataset.featureNames.length, {
+    ...hyper.architecture,
+    featureNames: dataset.featureNames,
+    featureIndexMap: dataset.featureIndexMap,
+  });
   model.build();
-  log("Training started...");
+  model.inputDim = dataset.featureNames.length;
+  model.featureNames = dataset.featureNames.slice();
+  model.featureIndexMap = { ...dataset.featureIndexMap };
+  log(`${label} started${quickStarter ? " (quick sample)" : ""}...`);
+  setModelStatus(`${label}: running`);
   const losses = [], valAcc = [];
   enableTraining(false);
+  const cleanup = [];
   try {
-    await model.train(dataset.X_train, dataset.y_train, {
-      epochs: hyper.training.epochs,
-      batchSize: hyper.training.batchSize,
-      validationSplit: hyper.training.validationSplit,
+    const sampleSize = quickStarter
+      ? Math.min(DEFAULT_HYPERPARAMS.starterSample, dataset.X_train.shape[0])
+      : dataset.X_train.shape[0];
+    const trainXs = quickStarter
+      ? tf.tidy(() => {
+          const t = dataset.X_train.slice([0, 0], [sampleSize, dataset.X_train.shape[1]]);
+          cleanup.push(t);
+          return t;
+        })
+      : dataset.X_train;
+    const trainYs = quickStarter
+      ? tf.tidy(() => {
+          const t = dataset.y_train.slice([0, 0], [sampleSize, 1]);
+          cleanup.push(t);
+          return t;
+        })
+      : dataset.y_train;
+
+    await model.train(trainXs, trainYs, {
+      epochs: quickStarter ? DEFAULT_HYPERPARAMS.starterEpochs : hyper.training.epochs,
+      batchSize: quickStarter ? Math.min(DEFAULT_HYPERPARAMS.batchSize, sampleSize) : hyper.training.batchSize,
+      validationSplit: quickStarter ? 0.1 : hyper.training.validationSplit,
       onEpochEnd: (epoch, logs) => {
         const val = logs.val_acc ?? logs.val_accuracy ?? 0;
         log(`Epoch ${epoch + 1}: loss=${Number(logs.loss).toFixed(4)} val_acc=${Number(val).toFixed(4)}`);
@@ -467,14 +735,23 @@ async function trainModel() {
       }
     });
 
-    log("Training complete.");
-    els.saveBtn.disabled = false;
-    els.evalBtn.disabled = false;
+    log(`${label} complete.`);
+    if (els.saveBtn) els.saveBtn.disabled = false;
+    if (els.evalBtn) els.evalBtn.disabled = false;
     showPredictPanel(true);
+    setModelStatus("Model: ready");
+    if (opts.autoSave) {
+      await model.save();
+      log("Starter model saved to browser storage.");
+    }
+    if (opts.onComplete) opts.onComplete();
   } catch (err) {
     log(`Training failed: ${err.message}`);
-    alert(err.message);
+    if (!silent) alert(err.message);
+    setModelStatus("Model: training failed");
+    throw err;
   } finally {
+    cleanup?.forEach?.((t) => t.dispose?.());
     enableTraining(true);
   }
 }
@@ -482,14 +759,15 @@ async function trainModel() {
 async function evaluateModel() {
   if (!dataset || !model) return alert("Train the model first.");
   log("Evaluating on test set...");
-  const { loss, acc } = await model.evaluate(dataset.X_test, dataset.y_test);
-  log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)}`);
+  const { loss, acc, metricAcc } = await model.evaluate(dataset.X_test, dataset.y_test);
+  log(`Test Loss=${loss.toFixed(4)} | Accuracy=${acc.toFixed(4)} (tf: ${metricAcc.toFixed(4)})`);
   const cm = await model.confusionMatrix(dataset.X_test, dataset.y_test);
   drawConfusionMatrix(cm);
 }
 
 function drawLossChart(losses, valAcc) {
-  const ctx = els.lossCanvas.getContext("2d");
+  const ctx = els.lossCanvas?.getContext?.("2d");
+  if (!ctx) return;
   if (lossChart) lossChart.destroy();
   lossChart = new Chart(ctx, {
     type: "line",
@@ -505,7 +783,8 @@ function drawLossChart(losses, valAcc) {
 }
 
 function drawConfusionMatrix({ tp, tn, fp, fn }) {
-  const ctx = els.cmCanvas.getContext("2d");
+  const ctx = els.cmCanvas?.getContext?.("2d");
+  if (!ctx) return;
   if (cmChart) cmChart.destroy();
   cmChart = new Chart(ctx, {
     type: "bar",
@@ -525,23 +804,51 @@ function drawConfusionMatrix({ tp, tn, fp, fn }) {
   });
 }
 
+function initTennisBackground() {
+  if (!els.tennisBg) return;
+  const count = 18;
+  for (let i = 0; i < count; i++) {
+    const ball = document.createElement("span");
+    ball.className = "tennis-ball";
+    ball.style.left = `${Math.random() * 100}%`;
+    ball.style.animationDelay = `${Math.random() * 6}s`;
+    ball.style.setProperty("--duration", `${6 + Math.random() * 6}s`);
+    ball.style.setProperty("--scale", `${0.6 + Math.random() * 0.8}`);
+    els.tennisBg.appendChild(ball);
+  }
+}
+
 async function handlePredict(e) {
   e.preventDefault();
-  if (!model || !loader) return alert("Train or load a model first.");
+  if (!loader || !dataset) return alert("Load data first.");
   if (!currentAutoVector) {
     alert("Select two players with available matchup data first.");
     return;
   }
   try {
-    const vec = loader.vectorizeForPredict(currentAutoVector);
+    await ensurePredictCompatibility();
+    let vec = loader.vectorizeForPredict(currentAutoVector);
+    let expected = getModelInputDim(model);
+    if (expected && expected !== vec.length) {
+      await purgeSavedModel(`shape mismatch before predict (expected ${expected}, found ${vec.length})`);
+      await ensureModelReady();
+      if (!model) throw new Error("Model unavailable after refresh.");
+      vec = loader.vectorizeForPredict(currentAutoVector);
+      expected = getModelInputDim(model);
+      if (expected && expected !== vec.length) {
+        throw new Error(`Model schema mismatch persists (expected ${expected}, found ${vec.length}). Please reload.`);
+      }
+    }
     const x = tf.tensor2d([Array.from(vec)], [1, vec.length], "float32");
     const yProb = model.predictProba(x);
     const prob = (await yProb.data())[0];
     const pred = prob >= 0.5 ? 1 : 0;
     const player1 = currentAutoPayload?.players?.player1 || "Player 1";
     const player2 = currentAutoPayload?.players?.player2 || "Player 2";
-    const outcome = pred === 1 ? `${player1} wins` : `${player1} loses`;
-    els.predictOut.textContent = `${outcome} vs ${player2} (P=${prob.toFixed(3)})`;
+    const outcome = pred === 1 ? `${player1} favored` : `${player2} favored`;
+    const pct1 = (prob * 100).toFixed(1);
+    const pct2 = (100 - prob * 100).toFixed(1);
+    els.predictOut.textContent = `${outcome} — win chance ${pct1}% for ${player1} / ${pct2}% for ${player2}`;
     x.dispose(); yProb.dispose();
   } catch (err) {
     log(`Prediction failed: ${err.message}`);
@@ -549,27 +856,44 @@ async function handlePredict(e) {
   }
 }
 
-// Buttons
-els.trainBtn.addEventListener("click", trainModel);
-els.evalBtn.addEventListener("click", evaluateModel);
-els.saveBtn.addEventListener("click", async () => {
-  if (model) { await model.save(); log("Model saved to browser storage."); }
-});
-els.loadModelBtn.addEventListener("click", async () => {
-  try {
-    const m = new ModelMLP(dataset ? dataset.featureNames.length : 0);
-    await m.load();
-    model = m;
-    log("Model loaded from browser storage.");
-    showPredictPanel(true);
-    enableTraining(Boolean(dataset));
-    if (!dataset || !loader) {
-      log("Load a dataset to enable predictions with the restored model.");
+// Buttons (guarded for hidden technical controls)
+if (els.trainBtn) els.trainBtn.addEventListener("click", trainModel);
+if (els.evalBtn) els.evalBtn.addEventListener("click", evaluateModel);
+if (els.saveBtn) {
+  els.saveBtn.addEventListener("click", async () => {
+    if (model) { await model.save(); log("Model saved to browser storage."); }
+  });
+}
+if (els.loadModelBtn) {
+  els.loadModelBtn.addEventListener("click", async () => {
+    try {
+      setModelStatus("Model: loading saved neural net…");
+      const m = new ModelMLP(dataset ? dataset.featureNames.length : 0, {
+        featureNames: dataset?.featureNames || [],
+        featureIndexMap: dataset?.featureIndexMap || {},
+      });
+      await m.load();
+      if (dataset && !isModelCompatibleWithDataset(m)) {
+        const expected = dataset.featureNames.length;
+        const found = m?.inputDim ?? "unknown";
+        await purgeSavedModel(`schema mismatch (expected ${expected} features, found ${found})`);
+        m.dispose();
+        throw new Error("Saved model incompatible with current dataset schema.");
+      }
+      model = m;
+      log("Model loaded from browser storage.");
+      showPredictPanel(true);
+      enableTraining(Boolean(dataset));
+      setModelStatus("Model: ready (restored)");
+      if (!dataset || !loader) {
+        log("Load a dataset to enable predictions with the restored model.");
+      }
+    } catch {
+      alert("No saved model found or load failed.");
+      setModelStatus("Model: needs training");
     }
-  } catch {
-    alert("No saved model found or load failed.");
-  }
-});
+  });
+}
 CATEGORY_FIELDS.forEach(({ key, el }) => {
   if (!el) return;
   el.addEventListener("change", () => handleCategorySelectChange(key));
@@ -577,21 +901,24 @@ CATEGORY_FIELDS.forEach(({ key, el }) => {
 els.player1Select.addEventListener("change", handlePlayer1Change);
 els.player2Select.addEventListener("change", updateAutoPreview);
 els.predictBtn.addEventListener("click", handlePredict);
-els.loadFileBtn.addEventListener("click", handleManualFileLoad);
-els.clearLogsBtn.addEventListener("click", () => {
-  els.logs.textContent = "";
-});
-
+if (els.loadFileBtn) els.loadFileBtn.addEventListener("click", handleManualFileLoad);
+if (els.clearLogsBtn && els.logs) {
+  els.clearLogsBtn.addEventListener("click", () => {
+    els.logs.textContent = "";
+  });
+}
 // Init
 console.log("🚀 App initialized — calling autoLoadCSV()");
 enableTraining(false);
 buildCategoryControls();
 showPredictPanel(false);
+initTennisBackground();
 autoLoadCSV();
 console.log("✅ autoLoadCSV() call placed after init");
 
 function readHyperparameters() {
-  const epochs = clampInt(els.epochsInput.value, 1, 200, 6);
+  const epochValue = els.epochsInput?.value ?? DEFAULT_HYPERPARAMS.epochs ?? 6;
+  const epochs = clampInt(epochValue, 1, 200, 6);
   return {
     training: {
       epochs,
@@ -612,7 +939,7 @@ function clampInt(value, min, max, fallback) {
 }
 
 async function handleManualFileLoad() {
-  if (!els.fileInput.files || els.fileInput.files.length === 0) {
+  if (!els.fileInput || !els.fileInput.files || els.fileInput.files.length === 0) {
     return alert("Select a CSV file first.");
   }
   const file = els.fileInput.files[0];

@@ -4,12 +4,14 @@ const tf = window.tf;
 export class ModelMLP {
   constructor(inputDim, config = {}) {
     this.inputDim = inputDim;
+    this.featureNames = Array.isArray(config.featureNames) ? config.featureNames.slice() : [];
+    this.featureIndexMap = config.featureIndexMap || {};
     this.model = null;
-    this.modelKey = "wta-mlp-v1";
+    this.modelKey = "wta-mlp-v2";
     this.metaKey = `${this.modelKey}-meta`;
     this.config = {
-      hiddenUnits: config.hiddenUnits && config.hiddenUnits.length ? config.hiddenUnits : [128, 64],
-      dropout: typeof config.dropout === "number" ? config.dropout : 0.3,
+      hiddenUnits: config.hiddenUnits && config.hiddenUnits.length ? config.hiddenUnits : [128, 64, 32],
+      dropout: typeof config.dropout === "number" ? config.dropout : 0,
       learningRate: typeof config.learningRate === "number" ? config.learningRate : null,
     };
   }
@@ -18,15 +20,14 @@ export class ModelMLP {
     if (this.model) this.dispose();
     const model = tf.sequential();
     const hiddenUnits = Array.from(this.config.hiddenUnits).filter((u) => Number.isFinite(u) && u > 0);
-    if (hiddenUnits.length === 0) hiddenUnits.push(64);
+    if (hiddenUnits.length === 0) hiddenUnits.push(128, 64, 32);
+
     hiddenUnits.forEach((units, idx) => {
       const layerConfig = { units, activation: "relu" };
       if (idx === 0) layerConfig.inputShape = [this.inputDim];
       model.add(tf.layers.dense(layerConfig));
-      if (idx === 0 && this.config.dropout && this.config.dropout > 0) {
-        model.add(tf.layers.dropout({ rate: Math.max(0, Math.min(0.9, this.config.dropout)) }));
-      }
     });
+
     model.add(tf.layers.dense({ units: 1, activation: "sigmoid" }));
     const optimizer = this.config.learningRate
       ? tf.train.adam(this.config.learningRate)
@@ -58,14 +59,29 @@ export class ModelMLP {
     const lossTensor = evalOut[0];
     const accTensor = evalOut[1];
     const loss = (await lossTensor.data())[0];
-    const acc = (await accTensor.data())[0];
+    const metricAcc = (await accTensor.data())[0];
+
+    const preds = this.model.predict(X_test);
+    const probs = await preds.data();
+    const labels = Array.from(await y_test.data()).map((v) => Math.round(v));
+    let correct = 0;
+    for (let i = 0; i < labels.length; i++) {
+      const pred = probs[i] >= 0.5 ? 1 : 0;
+      if (pred === labels[i]) correct++;
+    }
+    const manualAcc = labels.length ? correct / labels.length : 0;
+
     lossTensor.dispose();
     accTensor.dispose();
-    return { loss, acc };
+    preds.dispose();
+    return { loss, acc: manualAcc, metricAcc };
   }
 
   predictProba(X) {
     if (!this.model) throw new Error("Model not built or loaded.");
+    if (X.shape[1] !== this.inputDim) {
+      throw new Error(`Invalid input shape: expected ${this.inputDim}, got ${X.shape[1]}`);
+    }
     return this.model.predict(X);
   }
 
@@ -91,6 +107,8 @@ export class ModelMLP {
     localStorage.setItem(this.metaKey, JSON.stringify({
       inputDim: this.inputDim,
       config: this.config,
+      featureNames: this.featureNames,
+      featureIndexMap: this.featureIndexMap,
     }));
   }
 
@@ -106,6 +124,8 @@ export class ModelMLP {
           learningRate: typeof meta.config.learningRate === "number" ? meta.config.learningRate : this.config.learningRate,
         };
       }
+      if (meta?.featureNames) this.featureNames = meta.featureNames;
+      if (meta?.featureIndexMap) this.featureIndexMap = meta.featureIndexMap;
     } catch (err) {
       console.warn("Failed to restore model metadata", err);
     }

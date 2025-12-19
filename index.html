@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>WTA Match Outcome — Browser ML Demo (TensorFlow.js)</title>
+  <title>WTA Match Predictor</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- Chart.js for visualizations -->
@@ -15,56 +15,27 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
+  <div class="tennis-bg" id="tennisBg"></div>
   <header>
-    <h1>WTA Match Outcome — In-Browser Neural Network (TensorFlow.js)</h1>
+    <div class="hero">
+      <div>
+        <p class="eyebrow">Instant WTA match companion</p>
+        <h1>See who has the edge before the first serve</h1>
+        <p class="lede">We auto-load the latest dataset, restore a trained neural net, and turn raw stats into plain-English insights you can trust.</p>
+      </div>
+      <div class="hero-badge" id="modelStatus">Model: loading…</div>
+    </div>
   </header>
 
   <div class="container">
-    <div class="card">
-      <h3 style="margin-top:0;">Dataset & Training Controls</h3>
-      <div class="row btn-row">
-        <button id="trainBtn" disabled>Train Model</button>
-        <button id="evalBtn" disabled>Evaluate</button>
-        <button id="saveBtn" disabled>Save Model</button>
-        <button id="loadModelBtn">Load Saved</button>
-      </div>
-      <div class="row file-row">
-        <input type="file" id="fileInput" accept=".csv" />
-        <button id="loadFileBtn" type="button">Load CSV</button>
-        <span class="small">Use this if automatic loading of <code>wta_data.csv</code> fails.</span>
-      </div>
-      <div class="hyper-grid">
-        <label>Epochs<input type="number" id="epochsInput" value="6" min="1" max="200" /></label>
-        <label>Batch size<input type="number" id="batchSizeInput" value="256" min="8" max="1024" step="8" disabled /></label>
-        <label>Validation split<input type="number" id="valSplitInput" value="0.2" min="0.05" max="0.4" step="0.05" disabled /></label>
-        <label>Hidden layer 1<input type="number" id="layer1Units" value="128" min="4" max="512" disabled /></label>
-        <label>Hidden layer 2<input type="number" id="layer2Units" value="64" min="0" max="512" disabled /></label>
-        <label>Dropout<input type="number" id="dropoutRate" value="0.3" min="0" max="0.8" step="0.05" disabled /></label>
-      </div>
-      <div class="small muted" style="margin-top:6px;">Batch size, validation split, hidden layers, and dropout stay at their default values.</div>
-      <div class="metrics" id="info" style="margin-top:8px;">Loading dataset...</div>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0;">Training Progress & Results</h3>
-      <div class="charts">
-        <div style="height:280px;">
-          <canvas id="lossChart"></canvas>
-          <div class="small">Training Loss & Validation Accuracy</div>
-        </div>
-        <div style="height:280px;">
-          <canvas id="cmChart"></canvas>
-          <div class="small">Confusion Matrix (Test Set)</div>
-        </div>
-      </div>
-      <div class="log-actions">
-        <button id="clearLogsBtn" type="button">Clear Log</button>
-      </div>
-      <pre id="logs"></pre>
-    </div>
-
     <div class="card" id="predictPanel">
-      <h3 style="margin-top:0;">Predict Future Match</h3>
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Quick compare</p>
+          <h3>Pick two players and get match-ready insights</h3>
+        </div>
+        <button id="predictBtn" type="button" class="primary">Predict</button>
+      </div>
       <div class="player-select-grid">
         <label>Player 1
           <select id="player1Select"></select>
@@ -73,7 +44,6 @@
           <select id="player2Select"></select>
         </label>
       </div>
-      <div class="scenario-note small">Scenario year fixed to <b>2025</b>. Choose surface, court, and round from recorded values.</div>
       <div class="match-context-grid">
         <label>Surface
           <select id="surfaceSelect"></select>
@@ -85,16 +55,47 @@
           <select id="roundSelect"></select>
         </label>
       </div>
+      <div class="scenario-note small">Scenario year fixed to <b>2025</b>. Conditions default to the most recent meeting but you can adjust.</div>
       <div id="matchSummary" class="small muted">Select two players to build a 2025 matchup from the dataset.</div>
-      <table class="feature-table">
-        <tbody id="featureTableBody"></tbody>
-      </table>
-      <button id="predictBtn" type="button">Predict</button>
-      <div id="predictOut" style="margin-top:10px; font-weight:600;"></div>
+      <div class="insight-grid">
+        <div class="insight-column">
+          <div class="insight-title">Player 1 strengths</div>
+          <ul id="player1Pros" class="insight-list"></ul>
+          <div class="insight-title muted">Watch points</div>
+          <ul id="player1Cons" class="insight-list muted"></ul>
+        </div>
+        <div class="insight-column">
+          <div class="insight-title">Player 2 strengths</div>
+          <ul id="player2Pros" class="insight-list"></ul>
+          <div class="insight-title muted">Watch points</div>
+          <ul id="player2Cons" class="insight-list muted"></ul>
+        </div>
+        <div class="insight-column">
+          <div class="insight-title">Match factors</div>
+          <ul id="neutralInsights" class="insight-list"></ul>
+          <div id="predictOut" class="predict-result"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Model & data</p>
+          <h3>Quick setup status</h3>
+        </div>
+        <div class="small muted" id="info">Loading dataset...</div>
+      </div>
+      <div class="friendly-progress" id="friendlyProgress">
+        <div class="loading-row">
+          <div class="loading-spinner" id="friendlySpinner"></div>
+          <div class="small" id="friendlyStatusText">Preparing the model for quick predictions…</div>
+        </div>
+      </div>
     </div>
 
     <div class="footer">
-      Data auto-loaded from <b>wta_data.csv</b> in project root.
+      Data auto-loaded from <b>wta_data.csv</b>. A pre-trained model is loaded automatically; retrain anytime.
     </div>
   </div>
 
